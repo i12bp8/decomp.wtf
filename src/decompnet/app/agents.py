@@ -655,10 +655,12 @@ class Manager:
         row = self.net.store.one("SELECT COUNT(*) AS n FROM functions WHERE project_id=? AND status='open'", proj["id"])
         return row["n"]
 
-    def _starred_left(self, slug: str, agent_id: int) -> tuple[int, int]:
-        """(★ Next in line functions still open, how many of those this agent could claim now: nobody else holds them)."""
+    def _starred_left(self, slug: str, agent_id: int, since: float = 0.0) -> tuple[int, int]:
+        """(★ Next in line functions still worth this helper's time: open and not released by it since `since`, how many
+        of those it could claim now: nobody else holds them)."""
         proj = self.net.project_row(slug)
         names = self.net.cfg(proj).get("priority", [])
+        names = [n for n in names if n not in self.net.released_since(agent_id, proj["id"], names, since)]
         rows = [self.net.store.one(
             "SELECT f.id, (SELECT agent_id FROM claims WHERE function_id=f.id) AS holder FROM functions f "
             "WHERE f.project_id=? AND f.name=? AND f.status='open'", proj["id"], name) for name in names]
@@ -685,7 +687,10 @@ class Manager:
         agent, token = self.net.local_agent(s.agent_name)
         self.assignments[agent.id] = s.slug
         only_starred = bool(s.options.get("only_starred"))
-        (self.net.starred_only.add if only_starred else self.net.starred_only.discard)(agent.id)
+        if only_starred:
+            self.net.starred_only[agent.id] = s.started_at
+        else:
+            self.net.starred_only.pop(agent.id, None)
         workdir = self.home / "agents" / s.id
         workdir.mkdir(parents=True, exist_ok=True)
         failures = throttles = 0
@@ -700,9 +705,9 @@ class Manager:
             twins.ordered.wait(120)
         while not s.stop.is_set():
             if only_starred:
-                total, free = self._starred_left(s.slug, agent.id)
+                total, free = self._starred_left(s.slug, agent.id, s.started_at)
                 if total == 0:
-                    s.push("info", "every ★ Next in line function is done 🎉")
+                    s.push("info", "no ★ Next in line function left to try: they're done, or you gave the rest back 🎉")
                     break
                 if free == 0:
                     if s.state != "waiting":
@@ -779,7 +784,7 @@ class Manager:
                 pass
         with self.net.store.tx() as db:  # release any claim the agent still holds so others can take it
             db.execute("DELETE FROM claims WHERE agent_id=?", (agent.id,))
-        self.net.starred_only.discard(agent.id)
+        self.net.starred_only.pop(agent.id, None)
 
     def prompt(self, s: Session) -> str:
         text = self._prompt(s)

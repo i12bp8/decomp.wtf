@@ -22,7 +22,7 @@ def net(tmp_path):
 
 def test_a_starred_only_helper_takes_the_stars_in_order_and_nothing_else(net):
     helper, _ = net.local_agent("helper")
-    net.starred_only.add(helper.id)
+    net.starred_only[helper.id] = 0.0
 
     with pytest.raises(NetworkError, match="isn't marked"):
         net.claim_row(helper, "game", "easy")  # by name, but not starred
@@ -37,7 +37,7 @@ def test_a_starred_only_helper_takes_the_stars_in_order_and_nothing_else(net):
     with net.store.tx() as db:
         db.execute("UPDATE functions SET status='matched' WHERE name='star_a'")
 
-    with pytest.raises(NetworkError, match="no ★ Next in line function is free"):
+    with pytest.raises(NetworkError, match="no ★ Next in line function is left for you"):
         net.claim_row(helper, "game")  # all starred are done: it doesn't fall back to `easy`
 
 
@@ -60,3 +60,25 @@ def test_the_session_knows_how_many_stars_are_left_and_how_many_are_free_to_take
     with net.store.tx() as db:
         db.execute("UPDATE functions SET status='matched' WHERE name IN ('star_a','star_b')")
     assert manager._starred_left("game", helper.id) == (0, 0)  # done: the session ends
+
+
+def test_a_star_the_helper_gave_back_is_not_handed_to_it_again(net, tmp_path):
+    """It was found to be data, not code: the next claim moves on, and when nothing else is left the session ends
+    (without this the same star came back every time and a new paid session started for it)."""
+    import time
+
+    from decompnet.app.agents import Manager
+
+    manager = Manager(net, tmp_path, "http://127.0.0.1:0/mcp")
+    helper, _ = net.local_agent("helper")
+    began = time.time() - 1
+    net.starred_only[helper.id] = began
+
+    assert net.claim_row(helper, "game")["name"] == "star_b"
+    net.release(helper, "star_b", "that's data", "game")
+    assert net.claim_row(helper, "game")["name"] == "star_a"  # not star_b again
+    net.release(helper, "star_a", "data too", "game")
+    assert manager._starred_left("game", helper.id, began) == (0, 0)  # nothing worth trying: the session ends
+    with pytest.raises(NetworkError, match="no ★ Next in line function is left for you"):
+        net.claim_row(helper, "game")
+    assert manager._starred_left("game", helper.id, time.time() + 5) == (2, 2)  # a later session tries them anew

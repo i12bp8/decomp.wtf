@@ -154,6 +154,7 @@ class RomNetwork(Network):
         self._active_attempts: dict[int, int] = {}
         self._rescan_previews: dict[str, tuple[str, list, dict]] = {}
         self.rescan_busy = lambda slug: False  # server supplies its built-in agent/session guard
+        self.starred_only: set[int] = set()  # helpers launched to work only on the ★ Next in line functions
 
     # ------------------------------------------------------------------ basics
 
@@ -1471,15 +1472,23 @@ class RomNetwork(Network):
             return self._claim_row_available(agent, project, function, strategy)
 
     def _claim_row_available(self, agent, project, function, strategy):
-        if function is None and project and not self.fork_slug(project):
+        if project and not self.fork_slug(project):
             proj = self._project(project)
-            for name in self.cfg(proj).get("priority", []):
-                row = self.store.one("SELECT f.id, f.status FROM functions f WHERE f.project_id=? AND f.name=?", proj["id"], name)
-                held = self.store.one("SELECT 1 FROM claims WHERE agent_id=?", agent.id)
-                if row and row["status"] == "open" and not held and not self.store.one(
-                        "SELECT 1 FROM claims WHERE function_id=?", row["id"]):
-                    function = name
-                    break
+            names = self.cfg(proj).get("priority", [])
+            held = self.store.one("SELECT 1 FROM claims WHERE agent_id=?", agent.id)
+            only = agent.id in self.starred_only
+            if only and function is not None and function not in names:
+                raise NetworkError(f"{function} isn't marked ★ Next in line: this helper works only on the starred ones")
+            if function is None:
+                for name in names:
+                    row = self.store.one("SELECT f.id, f.status FROM functions f WHERE f.project_id=? AND f.name=?", proj["id"], name)
+                    if row and row["status"] == "open" and not held and not self.store.one(
+                            "SELECT 1 FROM claims WHERE function_id=?", row["id"]):
+                        function = name
+                        break
+                if only and function is None and not held:
+                    raise NetworkError("no ★ Next in line function is free: the ones left are being worked on by "
+                                       "others, or all are done. Stop here: this session ends by itself.")
         return Network.claim_row(self, agent, project, function, strategy)
 
     # ------------------------------------------------------------------ autopilot

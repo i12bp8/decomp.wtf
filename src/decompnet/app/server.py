@@ -669,6 +669,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         "/api/compiler": (p_compiler, ["POST"]), "/api/export": (p_export, ["POST"]), "/api/open": (p_open, ["POST"]),
         "/api/delete": (p_delete, ["POST"]), "/api/agents/manual": (p_manual, ["POST"]),
         "/api/try": (p_try, ["POST"]), "/api/release": (p_release, ["POST"]),
+        "/api/claims/clear": (lambda s, r, d: {"cleared": net.clear_claims(s)}, ["POST"]),
         "/api/autopilot": (p_autopilot, ["POST"]), "/api/instructions": (p_instructions, ["POST"]),
         "/api/priority": (p_priority, ["POST"]), "/api/note": (p_note, ["POST"]),
         "/api/stats": (lambda s, r, d: net.stats(s), ["GET"]),
@@ -859,6 +860,8 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         kind, slug = str(data.get("kind", "")), str(data.get("slug", ""))
         given = data.get("options") or {}
         options = {k: v for k, v in given.items() if k in ("model", "per_session")}
+        if given.get("only_starred") is True:  # ★ Next in line only: the helper ends when those are done
+            options["only_starred"] = True
         options.setdefault("per_session", settings.data.get("per_session", agents.PER_SESSION))
         count = max(1, min(int(data.get("count", 1)), 8))
         picked: list[str] = []

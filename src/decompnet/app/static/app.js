@@ -1543,7 +1543,7 @@ function renderSessions(sessions) {
     const dot = s.state === "error" ? "err" : s.state === "working" ? "on" : s.state === "stopped" ? "" : "work";
     const live = ["starting", "working", "waiting"].includes(s.state);
     const b = board.get(s.agent);
-    const facts = [s.model ? esc(s.model) : "default model", s.runs ? `session ${s.runs}` : "", b && b.matched ? `<b class="ok">${b.matched} matched</b>` : "", b ? plural(b.compiles, "compile") : "",
+    const facts = [s.model ? esc(s.model) : "default model", s.only_starred ? "only ★" : "", s.runs ? `session ${s.runs}` : "", b && b.matched ? `<b class="ok">${b.matched} matched</b>` : "", b ? plural(b.compiles, "compile") : "",
       s.usd ? money(s.usd) : s.tokens ? `${(s.tokens / 1000).toFixed(0)}k tokens` : "", s.started_at ? `since ${clock(s.started_at).slice(0, 5)}` : ""].filter(Boolean);
     return `<div class="session"><div class="session-top"><span class="dot ${dot}"></span><b>${esc(s.label)}</b>
         <span class="state ${s.state === "error" ? "err" : ""}">${esc(STATE_TEXT[s.state] || s.state)}</span>
@@ -1617,6 +1617,7 @@ async function startAgents(a, model, count, btn, extra = {}) {
     const options = { ...extra };
     if (model && a.id !== "api") options.model = model;
     if (LZ.per) options.per_session = LZ.per;
+    if (LZ.starred && (S.ov?.priority || []).length) options.only_starred = true;
     await api("/api/agents/start", { method: "POST", body: { kind: a.id, slug: S.slug, count, options } });
     S.st.settings.launcher = { kind: a.id, model: model || "", count };
     if (model && a.id !== "api") {
@@ -1667,6 +1668,7 @@ function renderLauncher(box, compact = false) {
         ${compact ? "" : `<label class="field"><span>Functions per session</span><input data-f="per" type="number" min="1" max="20" value="${LZ.per || S.st.settings.per_session || 2}"></label>`}
         <span class="grow"></span>
         <button class="primary" data-act="start" type="button">${esc(launchLabel(a, LZ.model, LZ.count))}</button></div>
+      <label class="check"><input type="checkbox" data-f="starred" ${LZ.starred && (S.ov?.priority || []).length ? "checked" : ""} ${(S.ov?.priority || []).length ? "" : "disabled"}><span><b>Only ★ Next in line</b> (${(S.ov?.priority || []).length} pinned): work just on the starred functions and stop when they're all done.${(S.ov?.priority || []).length ? "" : " Open a function and click ★ Next first."}</span></label>
         <p class="muted small">${a.id === "api" ? "A built-in agent loop drives the model through the decomp tools." : esc(a.signin)} Each agent takes a different function; a fresh session every few functions keeps its context small.</p>` : ""}
     </div>`;
   wireCopies(box);
@@ -1679,6 +1681,8 @@ function renderLauncher(box, compact = false) {
   box.querySelectorAll("[data-step]").forEach((b) => { b.onclick = () => { LZ.count = Math.max(1, Math.min(8, LZ.count + Number(b.dataset.step))); box.querySelector(".stepper output").textContent = LZ.count; label(); }; });
   const per = box.querySelector('[data-f="per"]');
   if (per) per.onchange = () => { LZ.per = Math.max(1, Math.min(20, Number(per.value) || 4)); };
+  const starred = box.querySelector('[data-f="starred"]');
+  if (starred) starred.onchange = () => { LZ.starred = starred.checked; };
   wireEndpointFields(box);
   box.querySelectorAll("[data-ep]").forEach((c) => { c.onchange = () => { LZ.eps = [...box.querySelectorAll("[data-ep]:checked")].map((x) => x.dataset.ep); label(); }; });
   const addEp = box.querySelector('[data-act="add-ep"]'), pickEp = box.querySelector('[data-act="pick-ep"]');

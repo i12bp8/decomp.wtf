@@ -312,6 +312,17 @@ class Network:
         return (f"Released {fn['name']}. Your best attempt and notes are saved so the next agent starts "
                 f"where you left off. Call claim_function for a new one.")
 
+    def clear_claims(self, project: str | None = None) -> int:
+        """Drop every claim in a project, whoever holds it (the user's "cut them all"). The agents holding them aren't
+        told, so stop them first; their best attempts and notes stay. Returns how many claims there were."""
+        proj = self._project(project)
+        with self.store.tx() as db:
+            n = db.execute("DELETE FROM claims WHERE function_id IN (SELECT id FROM functions WHERE project_id=?)",
+                           (proj["id"],)).rowcount
+            if n:
+                self._event(db, proj["id"], None, "claims", f"{n} claim{'s' if n != 1 else ''} cleared")
+        return n
+
     def get_function(self, function: str, project: str | None = None, agent: Agent | None = None) -> str:
         return self._brief(self._function(function, project), agent, header="VIEW")
 

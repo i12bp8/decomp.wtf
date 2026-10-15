@@ -526,6 +526,7 @@ class Session:
         return {"id": self.id, "kind": self.kind, "label": self.label, "slug": self.slug, "agent": self.agent_name,
                 "state": self.state, "runs": self.runs, "error": self.error, "started_at": self.started_at,
                 "model": self.options.get("model") or "", "usd": round(self.usd, 4), "tokens": self.tokens,
+                "only_starred": bool(self.options.get("only_starred")),
                 "feed": [f for f in self.feed if f["seq"] > since]}
 
 
@@ -654,6 +655,16 @@ class Manager:
         row = self.net.store.one("SELECT COUNT(*) AS n FROM functions WHERE project_id=? AND status='open'", proj["id"])
         return row["n"]
 
+    def _starred_left(self, slug: str, agent_id: int) -> tuple[int, int]:
+        """(★ Next in line functions still open, how many of those this agent could claim now: nobody else holds them)."""
+        proj = self.net.project_row(slug)
+        names = self.net.cfg(proj).get("priority", [])
+        rows = [self.net.store.one(
+            "SELECT f.id, (SELECT agent_id FROM claims WHERE function_id=f.id) AS holder FROM functions f "
+            "WHERE f.project_id=? AND f.name=? AND f.status='open'", proj["id"], name) for name in names]
+        rows = [r for r in rows if r]
+        return len(rows), sum(1 for r in rows if r["holder"] in (None, agent_id))
+
     def _account(self, s: Session, usage: dict) -> None:
         """Add what a session spent to the session and to the project (kept in its config across restarts)."""
         usd, tokens = float(usage.get("usd") or 0), int(usage.get("tokens") or 0)
@@ -673,6 +684,8 @@ class Manager:
     def _run(self, s: Session) -> None:
         agent, token = self.net.local_agent(s.agent_name)
         self.assignments[agent.id] = s.slug
+        only_starred = bool(s.options.get("only_starred"))
+        (self.net.starred_only.add if only_starred else self.net.starred_only.discard)(agent.id)
         workdir = self.home / "agents" / s.id
         workdir.mkdir(parents=True, exist_ok=True)
         failures = throttles = 0
@@ -686,7 +699,18 @@ class Manager:
                            "(seconds; a minute the first time)")
             twins.ordered.wait(120)
         while not s.stop.is_set():
-            if self._left(s.slug) == 0:
+            if only_starred:
+                total, free = self._starred_left(s.slug, agent.id)
+                if total == 0:
+                    s.push("info", "every ★ Next in line function is done 🎉")
+                    break
+                if free == 0:
+                    if s.state != "waiting":
+                        s.push("info", "the ★ functions left are being worked on by others: waiting for them")
+                    s.state = "waiting"
+                    s.stop.wait(30)
+                    continue
+            elif self._left(s.slug) == 0:
                 s.push("info", "nothing left to decompile here 🎉")
                 break
             if (cap := self.over_budget(s.slug)) is not None:
@@ -755,9 +779,14 @@ class Manager:
                 pass
         with self.net.store.tx() as db:  # release any claim the agent still holds so others can take it
             db.execute("DELETE FROM claims WHERE agent_id=?", (agent.id,))
+        self.net.starred_only.discard(agent.id)
 
     def prompt(self, s: Session) -> str:
         text = self._prompt(s)
+        if s.options.get("only_starred"):
+            text += ("\nThis session is for the functions the user marked ★ Next in line, and only those: "
+                     "claim_function gives you the next one, and refuses anything else. When it says none is left, "
+                     "stop: the session ends by itself.\n")
         # the know-how every session reads first, given up front (saves each session its first tool calls)
         ov = self.net.overview(s.slug)
         if ov.get("kind") == "fork":

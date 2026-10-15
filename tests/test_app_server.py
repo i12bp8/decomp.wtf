@@ -34,7 +34,7 @@ def app(tmp_path_factory):
 
 
 def test_gui_needs_the_secret_and_the_right_host(app):
-    client, _, _ = app
+    client, net, _ = app
     anon = TestClient(client.app, base_url=f"http://127.0.0.1:{PORT}")
     assert anon.get("/api/state").status_code == 401
     assert anon.get("/").status_code == 401
@@ -45,9 +45,48 @@ def test_gui_needs_the_secret_and_the_right_host(app):
     assert evil.get("/api/state").status_code == 403
     # writes need the custom header too (a cross-site form can't send it)
     assert client.post("/api/settings", json={"per_session": 3}).status_code == 403
-    assert client.post("/api/settings", json={"per_session": 3}, headers={"X-Decomp": "1"}).status_code == 200
+    h = {"X-Decomp": "1"}
+    assert client.post("/api/settings", json={"per_session": 3}, headers=h).status_code == 200
     # these tests script the agents themselves: no autopilot after the import
-    assert client.post("/api/settings", json={"autopilot": False}, headers={"X-Decomp": "1"}).json()["autopilot"] is False
+    assert client.post("/api/settings", json={"autopilot": False}, headers=h).json()["autopilot"] is False
+    setting = client.post("/api/settings", json={"autopilot_after_match": True}, headers=h).json()
+    assert setting["autopilot_after_match"] is True and net.autopilot_after_match
+    setting = client.post("/api/settings", json={"autopilot_after_match": False}, headers=h).json()
+    assert setting["autopilot_after_match"] is False and not net.autopilot_after_match
+
+
+def test_manual_match_restarts_only_an_idle_autopilot_when_enabled():
+    import threading
+    from types import SimpleNamespace
+
+    net = object.__new__(RomNetwork)
+    net.autopilot_after_match = False
+    net.links = {}
+    net.autopilots = {"game": {"state": "done"}}
+    net._autopilot_restart_lock = threading.Lock()
+    calls = []
+    net.twins = SimpleNamespace(_full_running=lambda _: False, after_match=lambda *args: calls.append("twins"))
+    net.start_autopilot = lambda slug: calls.append(("autopilot", slug))
+    proj = {"slug": "game"}
+    manual = SimpleNamespace(name="human")
+
+    net.on_match(proj, 1, manual)
+    assert calls == ["twins"]
+
+    calls.clear()
+    net.autopilot_after_match = True
+    net.on_match(proj, 1, manual)
+    assert calls == [("autopilot", "game")]
+
+    calls.clear()
+    net.autopilots["game"] = {"state": "running"}
+    net.on_match(proj, 1, manual)
+    assert calls == ["twins"]
+
+    calls.clear()
+    net.autopilots["game"] = {"state": "done"}
+    net.on_match(proj, 1, SimpleNamespace(name="autopilot"))
+    assert calls == ["twins"]
 
 
 @needs_demo

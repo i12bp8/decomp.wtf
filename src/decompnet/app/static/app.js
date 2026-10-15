@@ -596,15 +596,36 @@ async function poll(first) {
     if (slug !== S.slug) return;
     S.ov = live.overview;
     let mapDirty = false;
+    const rescanned = !first && live.events.some((ev) => ev.kind === "rescan");
     for (const ev of live.events) {
       S.e = Math.max(S.e, ev.id);
-      if (["match", "split", "rename"].includes(ev.kind)) mapDirty = true;
+      if (["match", "split", "rename", "rescan"].includes(ev.kind)) mapDirty = true;
       if (ev.kind === "match" && !first) {
         S.flash.set(ev.detail, performance.now());
         if (ev.agent !== AUTO && ev.agent !== "@" + AUTO) toast(`<code>${esc(ev.detail)}</code>&nbsp;matched by ${esc(ev.agent || "an agent")}`, "match");
       }
       if (ev.kind === "autopilot" && !first) toast(`Autopilot: ${esc(ev.detail)}`, "match");
       if (ev.kind === "link" && !first) toast(`🔗 <code>${esc(ev.detail)}</code>&nbsp;is linked into the game`, "match");
+    }
+    if (rescanned) {
+      S.scores.clear(); S.flash.clear(); S.stats = null;
+      S.diffKey = null;
+      if (!$("drawer").hidden) {
+        S.fn = null;
+        if (S.editDirty) {
+          $("tryBtn").disabled = true;
+          $("fnPin").hidden = true;
+          $("noteAdd").disabled = true;
+          $("fnStatus").textContent = "map changed";
+          $("tryMsg").hidden = false;
+          $("tryMsg").className = "try-msg bad";
+          $("tryMsg").textContent = "The GBA function map was rescanned. Your unsaved source is kept here: copy it before reopening a function against the new map.";
+          showFnTab("code");
+        } else {
+          $("drawer").hidden = true;
+          if ($("dialog").hidden) document.body.classList.remove("locked");
+        }
+      }
     }
     for (const at of live.attempts) {
       S.a = Math.max(S.a, at.id);
@@ -630,6 +651,7 @@ async function poll(first) {
       if (claimSig !== S.claimSig || live.attempts.length) renderList();
     }
     S.claimSig = claimSig;
+    if (rescanned) await loadStats();
     if (S.fn && !$("drawer").hidden) {
       const touched = live.attempts.some((a) => a.function === S.fn) || live.events.some((e) => e.detail === S.fn);
       if (touched) refreshFn(false); else fnBadge();
@@ -694,6 +716,7 @@ function renderHeader(ov) {
   $("phWorkingText").textContent = `${w.n} agent${w.n === 1 ? "" : "s"} working`;
   $("phStartText").textContent = w.running.length ? "Add agents" : "Start agents";
   $("phStart").hidden = fork && !ov.ready;
+  $("phRescan").hidden = fork || ov.platform !== "gba";
   const room = ov.room;
   const pill = $("phRoom");
   pill.hidden = !room;
@@ -742,6 +765,73 @@ function openTogether() {
   };
 }
 $("phFolder").onclick = () => openFolder();
+
+$("phRescan").onclick = () => {
+  if (S.ov.kind === "fork" || S.ov.platform !== "gba") return;
+  const slug = S.slug;
+  const body = dialog("Rescan GBA functions", `<p>Analyse this project's ROM again using your edited <code>functions.cfg</code>. Preview does not change the project.</p>
+    <p class="muted small">Stop agents and autopilot and release any claims first. Applying keeps unchanged functions and safely archives prior work for changed or removed targets. Nothing starts automatically.</p>
+    <div class="row"><button class="primary" id="rsPreview" type="button">Preview changes</button><button class="ghost" id="rsApply" type="button" disabled>Apply reviewed changes</button></div>
+    <p id="rsStatus" role="status" aria-live="polite"></p>
+    <p id="rsError" class="bad" role="alert" hidden></p>
+    <div id="rsReport" hidden><p id="rsCounts"></p><details open><summary>Full report · inspect before applying</summary><pre class="joblog tall" id="rsDetails"></pre></details></div>
+    <details id="rsLogBox" hidden><summary>Analysis log</summary><pre class="joblog" id="rsLog"></pre></details>`);
+  const preview = body.querySelector("#rsPreview"), apply = body.querySelector("#rsApply");
+  const status = body.querySelector("#rsStatus"), error = body.querySelector("#rsError");
+  const report = body.querySelector("#rsReport"), counts = body.querySelector("#rsCounts");
+  const details = body.querySelector("#rsDetails"), log = body.querySelector("#rsLog");
+  let revision = null;
+  const run = async (applying) => {
+    if (applying && !revision) return;
+    if (applying && S.slug === slug && S.fn && S.editDirty) {
+      error.textContent = "Keep your unsaved editor source before applying, then preview again.";
+      error.hidden = false;
+      revision = null; apply.disabled = true;
+      return;
+    }
+    let applied = false;
+    const reviewedRevision = revision;
+    revision = null;
+    preview.disabled = true; apply.disabled = true;
+    error.hidden = true;
+    status.textContent = applying ? "Applying reviewed changes…" : "Analysing functions.cfg…";
+    body.querySelector("#rsLogBox").hidden = false;
+    log.textContent = "";
+    try {
+      const { job } = await api("/api/rescan", { method: "POST", body: { slug, apply: applying, ...(applying ? { revision: reviewedRevision } : {}) } });
+      const result = await followJob(job, log);
+      applied = applying;
+      const c = result.counts;
+      counts.textContent = `${c.added.toLocaleString()} added · ${c.removed.toLocaleString()} removed · ${c.changed.toLocaleString()} changed · ${c.unchanged.toLocaleString()} unchanged`;
+      details.textContent = JSON.stringify(result, null, 2);
+      report.hidden = false;
+      if (applying) {
+        status.textContent = "Changes applied. Agents and autopilot remain stopped.";
+        if (S.slug === slug) {
+          $("drawer").hidden = true; S.fn = null;
+          S.scores.clear(); S.flash.clear(); S.stats = null;
+          S.ov = await api(`/api/project?slug=${encodeURIComponent(slug)}`);
+          renderStats(S.ov);
+          await refreshMap();
+          await loadStats();
+        }
+      } else {
+        revision = result.revision;
+        apply.disabled = !revision;
+        status.textContent = "Preview ready. Inspect the full report, then explicitly apply if it is correct.";
+      }
+    } catch (e) {
+      status.textContent = applied ? "Changes applied, but refreshing the view failed. Reopen the project to refresh it."
+        : applying ? "Apply was not confirmed. Preview again before another apply; no automatic retry." : "Preview did not complete.";
+      error.textContent = e.message;
+      error.hidden = false;
+    } finally {
+      preview.disabled = false;
+    }
+  };
+  preview.onclick = () => run(false);
+  apply.onclick = () => run(true);
+};
 
 /* Forks: how much of the game is built from linked C (decomp.dev's "linked"), next to what matches. */
 function linkedText(ov) {
@@ -872,8 +962,10 @@ function renderNext(ov) {
   steps.push(`<span class="todo">○</span> Agents`, `<span class="todo">○</span> Export`);
   box.hidden = false;
   box.innerHTML = `<div class="next-text"><b>Next: start your agents</b><span class="steps-line">${steps.join("")}</span></div>
-    ${a && (a.installed || a.id === "api") ? `<button class="primary" id="nextGo" type="button">${esc(launchLabel(a, LZ.model, LZ.count))}</button>` : ""}
-    <button class="ghost" id="nextPick" type="button">Choose agent &amp; model</button>`;
+    <div class="next-actions">
+      ${a && (a.installed || a.id === "api") ? `<button class="primary" id="nextGo" type="button">${esc(launchLabel(a, LZ.model, LZ.count))}</button>` : ""}
+      <button class="ghost" id="nextPick" type="button">Choose agent &amp; model</button>
+    </div>`;
   const go = $("nextGo");
   if (go) go.onclick = () => a.id !== "api" ? startAgents(a, LZ.model, LZ.count, go)
     : (LZ.eps || []).length ? startAgents(a, "", LZ.count, go, { endpoints: LZ.eps }) : showLaunch();
@@ -1667,6 +1759,7 @@ function eventHtml(ev) {
     case "split": return `${who} split ${esc(d)}`;
     case "files": return `${who ? who + " " : ""}gave code without a source file one: ${esc(d)}`;
     case "import": return `ROM analysed: ${esc(d)}`;
+    case "rescan": return `GBA function map rescanned: ${esc(d)}`;
     case "compiler": return `compiler set to ${esc(d)}`;
     case "collab": return esc(d);
     default: return `${who} ${esc(ev.kind)} ${esc(d)}`;
@@ -1794,6 +1887,7 @@ function highlightC(text) {
 async function openFn(name) {
   const again = S.fn === name && !$("drawer").hidden;
   if (!again) { giveBack(name); S.editDirty = false; $("tryMsg").hidden = true; }
+  $("tryBtn").disabled = false; $("noteAdd").disabled = false;
   S.fn = name;
   $("drawer").hidden = false;
   document.body.classList.add("locked");
@@ -2509,7 +2603,8 @@ async function showSettingsPage() {
   $("setAgents").innerHTML = `
     <label class="field"><span>Functions per agent session (a fresh session keeps the agent's context small)</span><input id="perSession" type="number" min="1" max="20" value="${st.settings.per_session}"></label>
     <label class="field"><span>Budget: stop helper agents when a project's agents have spent this much (US dollars, as the agents report it; 0 = no limit)</span><input id="budgetSet" type="number" min="0" step="0.5" value="${st.settings.budget_usd || 0}"></label>
-    <label class="check"><input type="checkbox" id="autopilotSet" ${st.settings.autopilot !== false ? "checked" : ""}><span><b>Autopilot after each import</b>: try every function's machine draft first, so free matches cost no agent time.</span></label>`;
+    <label class="check"><input type="checkbox" id="autopilotSet" ${st.settings.autopilot !== false ? "checked" : ""}><span><b>Autopilot after each import</b>: try every function's machine draft first, so free matches cost no agent time.</span></label>
+    <label class="check"><input type="checkbox" id="autopilotAfterMatchSet" ${st.settings.autopilot_after_match ? "checked" : ""}><span><b>Restart autopilot after a manual match</b>: when autopilot is idle, try remaining machine drafts again after you or an agent matches a function.</span></label>`;
   const theme = savedTheme();
   $("setComputer").innerHTML = `
     <div class="field"><span>Appearance</span><div class="seg" id="themeSeg">${[["", "System"], ["light", "Light"], ["dark", "Dark"]].map(([k, l]) => `<button type="button" data-theme="${k}" class="${theme === k ? "on" : ""}">${l}</button>`).join("")}</div></div>
@@ -2543,6 +2638,7 @@ async function showSettingsPage() {
   const save = (body, msg) => api("/api/settings", { method: "POST", body }).then((s) => { S.st.settings = s; toast(msg); }).catch((e) => toast(esc(e.message), "err"));
   $("perSession").onchange = () => save({ per_session: Number($("perSession").value) }, "Saved.");
   $("autopilotSet").onchange = () => save({ autopilot: $("autopilotSet").checked }, "Saved.");
+  $("autopilotAfterMatchSet").onchange = () => save({ autopilot_after_match: $("autopilotAfterMatchSet").checked }, "Saved.");
   $("budgetSet").onchange = () => save({ budget_usd: Number($("budgetSet").value) || 0 }, "Budget saved.");
 }
 

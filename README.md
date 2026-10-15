@@ -213,7 +213,7 @@ GameCube and Wii projects (dtk-template) decomp.wtf takes care of the steps betw
 | Feature | What you get |
 | :-- | :-- |
 | **Live view** | A map of every function in the game, each agent's tool calls, scores falling to zero, all in real time. |
-| **Autopilot** | Free matches before agents spend a token: code the game has more than once is matched from its matched twin (names swapped, judged like any attempt: in Mario Party 6, 762 functions in 12 minutes, and 678 copies of hand-written assembly set aside), then every function's machine draft goes through the judge. |
+| **Autopilot** | Free matches before agents spend a token: code the game has more than once is matched from its matched twin (names swapped, judged like any attempt: in Mario Party 6, 762 functions in 12 minutes, and 678 copies of hand-written assembly set aside), then every function's machine draft goes through the judge. Settings can also restart it after a manual match when no pass is running. |
 | **Permuter** | Near misses agents leave (95% and up) get rewritten in the background, the way decomp-permuter does it: statement and declaration order, casts, temporaries. Improvements become the function's best attempt; a match is a match. |
 | **Fast agents** | Small functions come in batches (one turn writes several, one call judges them all), identical code is shown in the brief, agents are told to move on after four tries without progress, and functions whose code repeats are handed out first (one match, many free). |
 | **Your agent, your terminal** | `decomp connect`, then ask Claude Code, Codex or Antigravity CLI to decompile your game: it imports, opens the live view and works. |
@@ -326,6 +326,32 @@ calls, including code run through the TLB and code Rare and Nintendo shipped com
 2 overlays in a disc's other files. Every attempt is
 compiled with the game's compiler and checked byte for byte: linked at its address in the original (MIPS, ARM)
 or judged by objdiff inside the project's own build (GameCube, Wii, DS).
+
+**Refining a GBA function map.** Edit the existing ROM project's `functions.cfg`, stop its agents and
+autopilot, and release claims. Choose **Rescan GBA functions** in the project header, then **Preview changes**.
+Inspect the added/removed/changed/unchanged counts and full report before **Apply reviewed changes**.
+This updates the existing project without reimporting: unchanged functions keep their IDs and progress;
+prior source and history for changed or removed targets are archived. No agents or autopilot are started.
+The official MCP tool uses the current project: call `rescan_gba()` to preview, then
+`rescan_gba(apply=true, revision="<preview revision>")` only after reviewing its JSON report. In this checkout,
+the local API helper also waits for the report:
+
+```bash
+python3 local-tools/decomp_local.py --project <slug> rescan
+python3 local-tools/decomp_local.py --project <slug> rescan --apply --revision '<preview revision>'
+```
+
+Apply requires that preview's revision in the same server session. If the ROM, configuration or function map
+changes, or the app restarts, take and review a new preview; never automatically retry an outdated apply.
+The cfg is authoritative: rescanning does not automatically rediscover deleted starts. This currently supports
+Thumb entries only (`arm_func` is rejected because luvdis ignores it). Analysis never overwrites the project's
+cfg, assembly or authored C. Removed or renamed functions retain their original address labels so existing
+callers still resolve; an existing symbol name cannot be moved to another address through a rescan.
+
+Changed targets return to open status rather than keeping scores against obsolete bytes. Their prior sources,
+attempts and notes are retained in `rescan_archives.snapshot` in the app's SQLite database; the report includes
+the archive ID. Snapshots are read-only recovery records (JSON, with binary fields encoded as
+`{"$bytes":"<hex>"}`), not an automatic undo, and are deleted when the project is removed.
 
 **The base for ports and mods.** *Export project* writes a normal decomp tree (matched functions as C, the rest as
 assembly from splat or luvdis, a linker script and `build.py`) and proves it rebuilds your game byte for byte.

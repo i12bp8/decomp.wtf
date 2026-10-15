@@ -44,13 +44,15 @@ def read_info(data: bytes) -> dict:
             "compiler_guess": "AGBCC", "gp": 0}
 
 
-def _luvdis(rom: Path, workdir: Path, cfg_in: Path | None) -> tuple[str, list[int]]:
+def _luvdis(rom: Path, workdir: Path, cfg_in: Path | None, *, guess: bool = True) -> tuple[str, list[int]]:
     python = toolchains.venv_bin(toolchains.ensure("luvdis", log=lambda *_: None) / "venv", "python")
     out, cfg = workdir / "rom.s", workdir / "functions.cfg"
     args = [str(python), "-I", str(Path(__file__).with_name("luvdis_run.py")), "disasm", str(rom), "--min-calls", "1",
             "--min-length", "2", "-o", str(out), "-co", str(cfg)]
     if cfg_in is not None:
         args[5:5] = ["-c", str(cfg_in)]
+    if not guess:
+        args.append("--no-guess")
     try:
         res = subprocess.run(capped(args), capture_output=True, text=True, timeout=3600, encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
@@ -110,6 +112,68 @@ class GbaFunction:
     asm_only: str | None = None  # the name of a known hand-written assembly helper
 
 
+def read_function_config(text: str, rom_size: int) -> dict[int, str | None]:
+    """Strict subset of luvdis's [type] address [module.s] [name] grammar.
+
+    Module paths are accepted as metadata only: isolated analysis never lets luvdis
+    write to paths supplied by the project. Upstream luvdis ignores ARM entries.
+    """
+    out: dict[int, str | None] = {}
+    names: set[str] = set()
+    for line, raw in enumerate(text.splitlines(), 1):
+        parts = raw.partition("#")[0].split()
+        if not parts:
+            continue
+        mode = parts.pop(0) if parts[0] in ("arm_func", "thumb_func") else "thumb_func"
+        if mode == "arm_func":
+            raise RomError(f"functions.cfg line {line}: arm_func is unsupported by luvdis; use Thumb starts only")
+        if not parts or not re.fullmatch(r"(?:0x)?[0-9a-fA-F]{7,8}", parts[0]):
+            raise RomError(f"functions.cfg line {line}: expected [thumb_func] <address> [module.s] [name]")
+        addr = int(parts.pop(0), 16)
+        if addr & 1 or not BASE + 0xC0 <= addr <= BASE + rom_size - 2:
+            raise RomError(f"functions.cfg line {line}: address 0x{addr:08X} must be an even ROM code address after the header")
+        if parts and parts[0].endswith(".s"):
+            parts.pop(0)
+        if len(parts) > 1 or (parts and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", parts[0])):
+            raise RomError(f"functions.cfg line {line}: invalid function name or extra fields")
+        name = parts[0] if parts else None
+        if addr in out or (name is not None and name in names):
+            raise RomError(f"functions.cfg line {line}: duplicate address or function name")
+        out[addr] = name
+        if name:
+            names.add(name)
+    if not out:
+        raise RomError("functions.cfg contains no function starts; refusing an empty rescan")
+    return out
+
+
+def split_config(rom_path: Path, workdir: Path, cfg_text: str, log=print) -> list[GbaFunction]:
+    """Analyze exactly the edited cfg starts, without discovery or project writes.
+
+    The caller supplies an isolated workdir and a snapshot of the ROM. Names and
+    modules are stripped for analysis so every assembly block has an address label.
+    """
+    rom = rom_path.read_bytes()
+    configured = read_function_config(cfg_text, len(rom))
+    cfg = workdir / "input.cfg"
+    cfg.write_text("".join(f"thumb_func 0x{a:08X}\n" for a in sorted(configured)), encoding="utf-8")
+    log(f"analyzing {len(configured)} configured starts (automatic discovery disabled)")
+    asm, _ = _luvdis(rom_path, workdir, cfg, guess=False)
+    blocks = _asm_blocks(asm)
+    missing = set(configured) - blocks.keys()
+    if missing:
+        raise RomError("luvdis could not analyze configured starts: " + ", ".join(f"0x{a:08X}" for a in sorted(missing)))
+    out = _split_analysis(rom, asm, sorted(configured))
+    for fn in out:
+        if not fn.code or not fn.thumb:
+            raise RomError(f"functions.cfg: no valid Thumb body at 0x{fn.vram:08X}")
+        name = configured[fn.vram]
+        if name:
+            fn.asm = re.sub(rf"\b{re.escape(fn.name)}\b", name, fn.asm)
+            fn.name = name
+    return out
+
+
 def _asm_blocks(asm: str) -> dict[int, tuple[str, bool]]:
     """address -> (luvdis's assembly for that function, is Thumb)."""
     out: dict[int, tuple[str, bool]] = {}
@@ -156,6 +220,11 @@ def split(rom_path: Path, workdir: Path, log=print) -> list[GbaFunction]:
     log("finding the functions (luvdis, then a pass for code nothing calls)"
         + (f": a {len(rom) >> 20} MiB ROM takes several minutes" if big else ""))
     asm, found = find_functions(rom_path, workdir, log=log)
+    return _split_analysis(rom, asm, found, log)
+
+
+def _split_analysis(rom: bytes, asm: str, found: list[int], log=lambda *_: None) -> list[GbaFunction]:
+    """Shared body/literal-pool sizing for import and explicit cfg analysis."""
     blocks = _asm_blocks(asm)
     starts = sorted({a & ~1 for a in found if BASE <= (a & ~1) < BASE + len(rom)})
     literals = gba_candidates.literal_words(rom, starts)

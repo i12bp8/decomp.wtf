@@ -198,7 +198,9 @@ class Settings:
         eps = [masked(e) for e in self.endpoints()]
         return {"endpoints": eps, "api": eps[0] if eps else {},
                 "per_session": self.data.get("per_session", agents.PER_SESSION), "last_project": self.data.get("last_project"),
-                "autopilot": self.data.get("autopilot", True), "budget_usd": self.data.get("budget_usd") or 0,
+                "autopilot": self.data.get("autopilot", True),
+                "autopilot_after_match": bool(self.data.get("autopilot_after_match")),
+                "budget_usd": self.data.get("budget_usd") or 0,
                 "auto_update": bool(self.data.get("auto_update")), "check_updates": self.data.get("check_updates", True) is not False,
                 "launcher": _launcher(self.data.get("launcher") or {}), "recent_models": self.data.get("recent_models") or {}}
 
@@ -261,8 +263,12 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
     mcp_url = f"http://127.0.0.1:{port}/mcp"
     build_id = (updates.installed().get("commit") or "")[:12]  # a branch install: the commit it came from
     manager = agents.Manager(net, home, mcp_url)
+    net.rescan_busy = lambda slug: slug in manager._prep or any(
+        s.slug == slug and s.state in ("starting", "working", "waiting")
+        for s in list(manager.sessions.values()))
     jobs = Jobs(home / "logs" / "decomp.log")
     settings = Settings(home / "settings.json")
+    net.autopilot_after_match = bool(settings.data.get("autopilot_after_match"))
     manager.budget = lambda: float(settings.data.get("budget_usd") or 0)
 
     def remember(running: list[dict]) -> None:
@@ -580,6 +586,18 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
             return {k: v for k, v in res.items() if k != "log"} | {"log": res.get("log", "")[-1500:]}
         return {"job": jobs.start("export", work)}
 
+    def p_rescan(slug, request, data):
+        apply = data.get("apply", False)
+        if not isinstance(apply, bool):
+            raise ValueError("apply must be a boolean")
+        revision = data.get("revision")
+        if revision is not None and not isinstance(revision, str):
+            raise ValueError("revision must be a string")
+        if apply and not revision:
+            raise ValueError("preview the rescan first, then supply its revision")
+        return {"job": jobs.start("rescan", lambda log: net.rescan_gba(
+            slug, apply=apply, revision=revision, log=log))}
+
     def p_open(slug, request, data):
         why = hostenv.open_folder(Path(net.project_row(slug)["root"]))
         return {"ok": why is None, "message": why}
@@ -652,6 +670,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         "/api/autopilot": (p_autopilot, ["POST"]), "/api/instructions": (p_instructions, ["POST"]),
         "/api/priority": (p_priority, ["POST"]), "/api/note": (p_note, ["POST"]),
         "/api/stats": (lambda s, r, d: net.stats(s), ["GET"]),
+        "/api/rescan": (p_rescan, ["POST"]),
     }
     for path, (fn, methods) in routes.items():
         mcp.custom_route(path, methods=methods)(with_project(fn))
@@ -931,6 +950,9 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
             settings.data["per_session"] = max(1, min(int(data["per_session"]), 20))
         if "autopilot" in data:
             settings.data["autopilot"] = bool(data["autopilot"])
+        if "autopilot_after_match" in data:
+            settings.data["autopilot_after_match"] = bool(data["autopilot_after_match"])
+            net.autopilot_after_match = settings.data["autopilot_after_match"]
         if "budget_usd" in data:
             settings.data["budget_usd"] = max(0.0, float(data["budget_usd"] or 0))
         if "auto_update" in data:

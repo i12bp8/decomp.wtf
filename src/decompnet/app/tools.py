@@ -3,6 +3,7 @@ built-in API agent. Every tool works on the project the agent was started on."""
 
 from __future__ import annotations
 
+import json
 import re
 from importlib import resources
 from typing import Callable
@@ -185,6 +186,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "rename_symbol": lambda net, agent, slug, old, new, message="": net.rename_symbol(agent, slug, old, new, message),
     "split_function": lambda net, agent, slug, function, at, new_name="":
         net.split_function(agent, slug, function, at, new_name),
+    "rescan_gba": lambda net, agent, slug, apply=False, revision=None:
+        json.dumps(net.rescan_gba(slug, apply=apply, revision=revision, log=lambda message: None), indent=2),
     "read_data": lambda net, agent, slug, what, length=64: (net.forks.read_data(agent, slug, what, length)
                                                             if net.fork_slug(slug) else net.read_data(slug, what, length)),
     "list_functions": lambda net, agent, slug, status="open", limit=40: net.list_functions(slug, status, limit),
@@ -202,7 +205,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
         net.forks.split_file(agent, _fork(net, slug, "split_file"), path, at, new_name, data),
 }
 
-ROM_ONLY = {"get_context", "edit_context", "rename_symbol", "split_function"}
+ROM_ONLY = {"get_context", "edit_context", "rename_symbol", "split_function", "rescan_gba"}
 FORK_ONLY = {"read_file", "search_code", "edit_file", "file_status", "split_file"}
 
 
@@ -318,6 +321,18 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
         """Split a function the disassembler merged with the next one (e.g. after a function that never
         returns). `at` is the address where the second function starts."""
         return await run(ctx, "split_function", function=function, at=at, new_name=new_name)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def rescan_gba(ctx: Context, apply: bool = False, revision: str | None = None) -> str:
+        """GBA ROM projects only: rescan the existing project using its edited functions.cfg.
+
+        By default preview only: returns JSON counts, per-function details and a revision. Inspect
+        that report, then explicitly call with apply=true and its revision to apply the reviewed map.
+        Stale ROM, configuration or map revisions are rejected: preview again, never blindly retry apply.
+        Stop agents/autopilot and release claims first. Unchanged functions retain their state;
+        prior work on changed or removed targets is archived. Does not reimport or start any work.
+        """
+        return await run(ctx, "rescan_gba", apply=apply, revision=revision)
 
     @mcp.tool(meta=ALWAYS_LOAD)
     async def read_data(ctx: Context, what: str, length: int = 64) -> str:

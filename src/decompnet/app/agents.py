@@ -542,6 +542,13 @@ class Manager:
     # -- control
 
     def start(self, kind: str, slug: str, count: int = 1, options: dict | None = None) -> list[str]:
+        # Register workers under the same lock as a rescan reservation. A newly
+        # launched helper must not miss the rescan's idle-project check.
+        with self.net.store.lock:
+            self.net._require_not_rescanning(self.net.project_row(slug)["id"])
+            return self._start(kind, slug, count, options)
+
+    def _start(self, kind: str, slug: str, count: int, options: dict | None) -> list[str]:
         options = dict(options or {})
         if kind_id(kind) != kind:
             kind = kind_id(kind)

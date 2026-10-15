@@ -463,8 +463,14 @@ class Network:
         now = time.time()
         compiled = score is not None if compiled is None else compiled
         with self.store.tx() as db:
-            db.execute("INSERT INTO attempts(function_id,agent_id,score,compiled,context_version,source,created_at,via) "
-                       "VALUES(?,?,?,?,?,?,?,?)", (fn["id"], agent.id, score, compiled, ctx_version, source, now, via))
+            # A rescan can archive the highest attempt rows. Keep live-feed IDs
+            # above that watermark instead of reusing SQLite rowids.
+            next_id = db.execute(
+                "SELECT MAX(COALESCE((SELECT MAX(id) FROM attempts),0),"
+                "COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='attempt_id_floor'),0))+1"
+            ).fetchone()[0]
+            db.execute("INSERT INTO attempts(id,function_id,agent_id,score,compiled,context_version,source,created_at,via) "
+                       "VALUES(?,?,?,?,?,?,?,?,?)", (next_id, fn["id"], agent.id, score, compiled, ctx_version, source, now, via))
             db.execute("UPDATE functions SET attempts=attempts+1 WHERE id=?", (fn["id"],))
             if score is not None:
                 db.execute("UPDATE functions SET best_score=?, best_source=?, best_agent_id=? "

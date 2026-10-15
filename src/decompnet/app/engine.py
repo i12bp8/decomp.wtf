@@ -138,12 +138,18 @@ class RomNetwork(Network):
         self._ops: dict[int, dict] = {}  # project id -> look-alike index
         self._diffs: dict[tuple, dict] = {}  # (function, source, context, compiler) -> diff for the GUI
         self.autopilots: dict[str, dict] = {}  # slug -> progress of trying every function's machine draft
+        self.autopilot_after_match = False
+        self._autopilot_restart_lock = threading.Lock()
         from .forkengine import ForkEngine  # forks build on this class's claims, attempts and live view
         from .permute import Permuter
         from .twins import Twins
         self.forks = ForkEngine(self)
         self.twins = Twins(self)
         self.permuter = Permuter(self)
+        self._rescanning: set[int] = set()
+        self._active_attempts: dict[int, int] = {}
+        self._rescan_previews: dict[str, tuple[str, list, dict]] = {}
+        self.rescan_busy = lambda slug: False  # server supplies its built-in agent/session guard
 
     # ------------------------------------------------------------------ basics
 
@@ -481,6 +487,20 @@ class RomNetwork(Network):
         log(f"ready: {len(fns)} functions to decompile")
         return slug
 
+    def rescan_gba(self, slug: str, *, apply: bool = False, revision: str | None = None, log=print) -> dict:
+        """Preview edited functions.cfg; apply only against the exact preview revision.
+
+        Affected targets and their full history are archived atomically; unchanged
+        targets keep their IDs, matches, attempts and notes. No worker is started.
+        """
+        from .rescan import rescan_gba
+
+        return rescan_gba(self, slug, apply=apply, revision=revision, log=log)
+
+    def _require_not_rescanning(self, pid: int) -> None:
+        if pid in self._rescanning:
+            raise NetworkError("a GBA rescan is in progress; wait for it to finish before starting work")
+
     def _community_layout(self, data: bytes | Path, name: str = "") -> Path | None:
         """The file, when the game starts as a community-layout project: a GameCube/Wii program (DOL) or disc image
         (dtk-template), or a DS ROM (ds-decomp). Bytes are saved to a file first."""
@@ -738,6 +758,17 @@ class RomNetwork(Network):
         return "\n".join(out)
 
     def split_function(self, agent: Agent, project: str | None, function: str, at: str, new_name: str = "") -> str:
+        with self.store.lock:
+            pid = self._project(project)["id"]
+            self._require_not_rescanning(pid)
+            self._active_attempts[pid] = self._active_attempts.get(pid, 0) + 1
+        try:
+            return self._split_function_active(agent, project, function, at, new_name)
+        finally:
+            with self.store.lock:
+                self._active_attempts[pid] -= 1
+
+    def _split_function_active(self, agent, project, function, at, new_name):
         self._rom_only(project, "split_function")
         link = self._link(project)
         if link is not None:
@@ -848,6 +879,17 @@ class RomNetwork(Network):
         return f"✅ new function {new_name} at 0x{addr:08X}, {len(code)} bytes."
 
     def rename_symbol(self, agent: Agent, project: str | None, old: str, new: str, message: str = "") -> str:
+        with self.store.lock:
+            pid = self._project(project)["id"]
+            self._require_not_rescanning(pid)
+            self._active_attempts[pid] = self._active_attempts.get(pid, 0) + 1
+        try:
+            return self._rename_symbol_active(agent, project, old, new, message)
+        finally:
+            with self.store.lock:
+                self._active_attempts[pid] -= 1
+
+    def _rename_symbol_active(self, agent, project, old, new, message):
         self._rom_only(project, "rename_symbol")
         proj = self._project(project)
         if not self.is_rom(proj):
@@ -1009,6 +1051,7 @@ class RomNetwork(Network):
         """Up to n more small open functions next to `first` (same file, nearest address), claimed for the agent."""
         now = time.time()
         with self.store.tx() as db:
+            self._require_not_rescanning(proj["id"])
             self._expire_claims(db)
             rows = db.execute(
                 "SELECT f.* FROM functions f WHERE f.project_id=? AND f.status='open' AND f.boost >= 0 AND f.n_insns <= ? "
@@ -1050,6 +1093,18 @@ class RomNetwork(Network):
             time.sleep(0.2)
 
     def attempt(self, agent: Agent, function: str, source: str, project: str | None = None) -> dict:
+        # Include scratch compiles of matched functions, which deliberately have no claim.
+        with self.store.lock:
+            pid = self._function(function, project)["project_id"]
+            self._require_not_rescanning(pid)
+            self._active_attempts[pid] = self._active_attempts.get(pid, 0) + 1
+        try:
+            return self._attempt_active(agent, function, source, project)
+        finally:
+            with self.store.lock:
+                self._active_attempts[pid] -= 1
+
+    def _attempt_active(self, agent: Agent, function: str, source: str, project: str | None = None) -> dict:
         self._yield_autopilot(function, project)
         if (fork := self.fork_slug(project)):
             return self.forks.attempt(agent, fork, function, source)
@@ -1391,6 +1446,14 @@ class RomNetwork(Network):
         return self._update_cfg(slug, change)["priority"]
 
     def claim_row(self, agent: Agent, project: str | None = None, function: str | None = None, strategy: str = "easiest"):
+        self._yield_autopilot(function, project)
+        with self.store.lock:
+            proj = self._project(project) if project or function is None else self.store.one(
+                "SELECT * FROM projects WHERE id=?", self._function(function, project)["project_id"])
+            self._require_not_rescanning(proj["id"])
+            return self._claim_row_available(agent, project, function, strategy)
+
+    def _claim_row_available(self, agent, project, function, strategy):
         if function is None and project and not self.fork_slug(project):
             proj = self._project(project)
             for name in self.cfg(proj).get("priority", []):
@@ -1400,7 +1463,6 @@ class RomNetwork(Network):
                         "SELECT 1 FROM claims WHERE function_id=?", row["id"]):
                     function = name
                     break
-        self._yield_autopilot(function, project)
         return Network.claim_row(self, agent, project, function, strategy)
 
     # ------------------------------------------------------------------ autopilot
@@ -1410,6 +1472,17 @@ class RomNetwork(Network):
         background. Whatever already matches is saved before any agent spends a token on it; drafts that compile
         become the function's best attempt, so agents start from them. Agents and autopilot never collide: a
         function is held only while its draft compiles, and claimed ones are skipped."""
+        with self.store.lock:
+            pid = self._project(slug)["id"]
+            self._require_not_rescanning(pid)
+            self._active_attempts[pid] = self._active_attempts.get(pid, 0) + 1
+        try:
+            return self._start_autopilot_available(slug, workers)
+        finally:
+            with self.store.lock:
+                self._active_attempts[pid] -= 1
+
+    def _start_autopilot_available(self, slug: str, workers: int) -> dict:
         state = self.autopilots.get(slug)
         if state and state["state"] == "running":
             return state
@@ -1496,12 +1569,19 @@ class RomNetwork(Network):
                                 f"{drafts} of {state['tried']} functions matched from machine drafts")
 
     def on_match(self, proj, function_id: int, agent: Agent | None = None) -> None:
-        """Its twins get its code, at once. (Not for the full twins pass's own matches while it runs: it tries
-        those twins itself.)"""
+        """Queue twin matches, or start a fresh autopilot pass after a manual match when enabled."""
         if proj is None:
             return
         if agent is not None and agent.name == "autopilot" and self.twins._full_running(proj["slug"]):
             return
+        slug = proj["slug"]
+        if (self.autopilot_after_match and agent is not None and agent.name != "autopilot"
+                and slug not in self.links):
+            with self._autopilot_restart_lock:
+                state = self.autopilots.get(slug)
+                if not state or state["state"] != "running":
+                    self.start_autopilot(slug)
+                    return
         self.twins.after_match(proj, function_id)
 
     def try_quietly(self, agent, proj, fn, source: str) -> dict:

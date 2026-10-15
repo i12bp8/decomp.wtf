@@ -41,15 +41,15 @@ def windows(tmp_path, monkeypatch):
 
 def test_linux_only_compilers_install_and_run_through_wsl(windows):
     tc = toolchains.get("ee-gcc-2.96")
-    assert tc.via_wsl and tc.supported and not toolchains.get("binutils-mips").via_wsl  # that one has a Windows build
+    assert tc.via_linux and tc.supported and not toolchains.get("binutils-mips").via_linux  # that one has a Windows build
     toolchains.install("ee-gcc-2.96", log=lambda *_: None)
     home = windows / "wsl" / "ee-gcc-2.96"
-    assert toolchains.installed("ee-gcc-2.96")["wsl"] and (windows / "wsl" / "runtime-i386" / "ld-linux.so.2").exists()
+    assert toolchains.installed("ee-gcc-2.96")["linux"] and (windows / "wsl" / "runtime-i386" / "ld-linux.so.2").exists()
     gcc = home / "bin" / "ee-gcc"
     assert gcc.read_text().startswith("#!/bin/sh") and wsl.is_dynamic_i386(home / "bin" / "ee-gcc.i386")
 
     cfg = project.compiler_config(windows, {"compiler": {"toolchain": "ee-gcc-2.96"}})
-    assert cfg.wsl and cfg.runtime32 is None and cfg.cmd[0] == str(gcc)
+    assert cfg.linux and cfg.runtime32 is None and cfg.cmd[0] == str(gcc)
     res = compiler.compile_source(cfg, "typedef int s32;", "s32 add_one(s32 a) { return a * 3 + 1; }")
     assert res.ok, res.log
     assert res.obj[:4] == b"\x7fELF" and b"add_one" in res.obj

@@ -15,12 +15,15 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import wsl
+from . import linuxbox, wsl
 
 MAX_SOURCE_BYTES = 64 * 1024
 # Per-compile resource caps (address space, CPU seconds, output file size) and a global
 # concurrency cap, so a hostile submission can't take the host down with it.
-LIMITS = ["--as=2147483648", "--cpu=30", "--fsize=67108864"]
+# DECOMP_COMPILER_AS_LIMIT (bytes, 0 = none): the old 32-bit compilers run emulated in Docker on Apple Silicon, and the
+# emulator needs a 4 GiB guest address space, so a cap under that makes it fail ("Unable to find a guest_base").
+LIMITS = [*([f"--as={n}"] if (n := int(os.environ.get("DECOMP_COMPILER_AS_LIMIT", 2147483648))) else []),
+          "--cpu=30", "--fsize=67108864"]
 _SLOTS = threading.BoundedSemaphore(max(2, (os.cpu_count() or 4) - 1))
 
 _COMMENTS_AND_STRINGS = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', re.S)
@@ -60,7 +63,7 @@ class CompilerConfig:
     ro_paths: tuple[str, ...] = ()
     include_dirs: tuple[str, ...] = ()  # absolute paths of extra (static) header dirs
     runtime32: str | None = None  # 32-bit x86 C runtime for old i386 compiler binaries (see toolchains)
-    wsl: bool = False  # a Linux toolchain on Windows: runs inside WSL 2, `cmd` holds WSL paths (see wsl.py)
+    linux: bool = False  # a Linux-only toolchain: runs inside WSL 2 (Windows) or the compiler container (macOS), `cmd` holds paths there (see wsl.py, linuxbox.py)
 
 
 @dataclass
@@ -70,18 +73,26 @@ class CompileResult:
     log: str
 
 
+def _work_parent(cfg: CompilerConfig) -> str | None:
+    """Where a compile's folder is made: in the compile area the compiler container shares, else the system's temp."""
+    if cfg.linux and not wsl.wanted():
+        linuxbox.work_root().mkdir(parents=True, exist_ok=True)
+        return str(linuxbox.work_root())
+    return None
+
+
 def _sandbox_mode(cfg: CompilerConfig) -> str:
-    if cfg.wsl:
-        return "wsl"
+    if cfg.linux:
+        return "linux"
     if cfg.sandbox != "auto":
         return cfg.sandbox
     return "bwrap" if shutil.which("bwrap") else "none"
 
 
 def _root(cfg: CompilerConfig, work: Path) -> str:
-    """How the compiler sees the work folder (in WSL it works on a copy, see wsl.run)."""
+    """How the compiler sees the work folder (on a Linux side it works on a copy, see wsl.script)."""
     mode = _sandbox_mode(cfg)
-    return "/work" if mode in ("bwrap", "docker") else wsl.stage_dir() if mode == "wsl" else str(work)
+    return "/work" if mode in ("bwrap", "docker") else wsl.stage_dir() if mode == "linux" else str(work)
 
 
 def _wrap(cfg: CompilerConfig, work: Path, argv: list[str]) -> list[str]:
@@ -114,9 +125,9 @@ def _wrap(cfg: CompilerConfig, work: Path, argv: list[str]) -> list[str]:
 
 
 def _exec(cfg: CompilerConfig, work: Path, argv: list[str], timeout: float, cwd: Path | None = None, **stage):
-    """`stage`: in WSL, run on a copy in WSL's own file system (wsl.run's outputs, inputs and stage)."""
-    if _sandbox_mode(cfg) == "wsl":
-        return wsl.run(argv, cwd or work, timeout, **stage)
+    """`stage`: on a Linux side, run on a copy in its own file system (wsl.script's outputs, inputs and stage)."""
+    if _sandbox_mode(cfg) == "linux":
+        return (wsl.run if wsl.wanted() else linuxbox.run)(argv, cwd or work, timeout, **stage)
     # in the work folder, never in the app's own: KMC GCC's assembler (binutils 2.6) can't read its input when the
     # current directory is / ("Bad file descriptor"), which it is for decomp.wtf started by a service or in Docker
     return subprocess.run(_wrap(cfg, work, argv), cwd=cwd or work, capture_output=True, text=True, encoding="utf-8",
@@ -127,7 +138,7 @@ def run_in(cfg: CompilerConfig, work: Path, argv: list[str], timeout: float = 30
            inputs: list[str] | None = None, outputs: list[str] | None = None) -> subprocess.CompletedProcess:
     """Run a toolchain command inside `work` (the sandbox's /work), e.g. to build a whole exported project.
     Paths in `argv` must be relative to `work`. In WSL, naming the files it reads (`inputs`) and writes (`outputs`)
-    lets old 32-bit compilers work on a copy in WSL's own file system, which they need (see wsl.run)."""
+    lets old 32-bit compilers work on a copy in the Linux side's own file system, which they need (see wsl.script)."""
     return _exec(cfg, Path(work), argv, timeout, cwd=Path(work),
                  **({} if outputs is None else {"inputs": inputs, "outputs": outputs}))
 
@@ -139,8 +150,10 @@ def compile_source(cfg: CompilerConfig, context_header: str, source: str, truste
         except SourceRejected as e:
             return CompileResult(False, None, f"rejected: {e}")
 
-    with tempfile.TemporaryDirectory(prefix="decompnet-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="decompnet-", dir=_work_parent(cfg)) as tmp:
         work = Path(tmp)
+        if cfg.linux and not wsl.wanted():
+            work.chmod(0o777)  # the container's user isn't the Mac user
         inc = work / "include"
         inc.mkdir()
         for d in cfg.include_dirs:
@@ -157,7 +170,7 @@ def compile_source(cfg: CompilerConfig, context_header: str, source: str, truste
         try:
             with _SLOTS:
                 proc = _exec(cfg, work, argv, cfg.timeout,
-                             **({"outputs": ["func.o"], "stage": root} if _sandbox_mode(cfg) == "wsl" else {}))
+                             **({"outputs": ["func.o"], "stage": root} if _sandbox_mode(cfg) == "linux" else {}))
         except subprocess.TimeoutExpired:
             return CompileResult(False, None, f"compiler timed out after {cfg.timeout}s")
         log = (proc.stdout + proc.stderr).replace(root + "/", "")

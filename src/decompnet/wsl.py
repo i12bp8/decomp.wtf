@@ -115,37 +115,41 @@ def stage_dir() -> str:
     return f"/tmp/decompnet-{secrets.token_hex(8)}"
 
 
+def script(here: str, argv: list[str], *, outputs: list[str] | None = None, inputs: list[str] | None = None,
+           stage: str | None = None) -> str:
+    """The shell script that runs `argv` in `here` (a folder as the Linux side sees it). With `outputs`, it runs in
+    `stage` (a folder in the Linux side's own file system, a new one by default) instead: `inputs` (paths relative to
+    `here`, all of it by default) are copied in first and `outputs` copied back after. The old 32-bit compilers need
+    that: a Windows drive's (or a Docker Desktop shared folder's) file IDs don't fit in their inode numbers, so every
+    file they look up there fails with "Value too large for defined data type"."""
+    q = shlex.quote
+    if outputs is None:
+        return f"cd {q(here)} || exit 1\nexec {shlex.join(argv)}\n"
+    stage = stage or stage_dir()
+    lines = [f"rm -rf {q(stage)} && mkdir -p {q(stage)} || exit 1", f"trap {q('rm -rf ' + q(stage))} EXIT"]
+    for i in inputs if inputs is not None else ["."]:
+        into = posixpath.join(stage, posixpath.dirname(i))
+        lines.append(f"mkdir -p {q(into)} && cp -R {q(posixpath.join(here, i))} {q(into + '/')} || exit 1")
+    lines += [f"mkdir -p {q(posixpath.join(stage, posixpath.dirname(o)))} || exit 1" for o in outputs]
+    lines += [f"cd {q(stage)} || exit 1", shlex.join(argv), "rc=$?"]
+    lines += [f"[ ! -e {q(o)} ] || cp {q(o)} {q(posixpath.join(here, o))} || rc=1" for o in outputs]
+    return "\n".join([*lines, 'exit "$rc"', ""])
+
+
 def run(argv: list[str], cwd: Path, timeout: float, *, outputs: list[str] | None = None,
         inputs: list[str] | None = None, stage: str | None = None) -> subprocess.CompletedProcess:
     """Run `argv` (WSL paths) inside WSL in `cwd` (a Windows folder). The command travels as a small script in the
-    temp folder, so nothing depends on how wsl.exe splits a Windows command line.
-
-    With `outputs`, it runs in `stage` (a folder in WSL's own file system, a new one by default) instead: `inputs`
-    (paths relative to `cwd`, all of it by default) are copied in first and `outputs` copied back after. The old
-    32-bit compilers need that: a Windows drive's file IDs don't fit in their inode numbers, so every file they look
-    up there fails with "Value too large for defined data type"."""
-    q, here = shlex.quote, path(cwd)
-    if outputs is None:
-        body = f"cd {q(here)} || exit 1\nexec {shlex.join(argv)}\n"
-    else:
-        stage = stage or stage_dir()
-        lines = [f"rm -rf {q(stage)} && mkdir -p {q(stage)} || exit 1", f"trap {q('rm -rf ' + q(stage))} EXIT"]
-        for i in inputs if inputs is not None else ["."]:
-            into = posixpath.join(stage, posixpath.dirname(i))
-            lines.append(f"mkdir -p {q(into)} && cp -R {q(posixpath.join(here, i))} {q(into + '/')} || exit 1")
-        lines += [f"mkdir -p {q(posixpath.join(stage, posixpath.dirname(o)))} || exit 1" for o in outputs]
-        lines += [f"cd {q(stage)} || exit 1", shlex.join(argv), "rc=$?"]
-        lines += [f"[ ! -e {q(o)} ] || cp {q(o)} {q(posixpath.join(here, o))} || rc=1" for o in outputs]
-        body = "\n".join([*lines, 'exit "$rc"', ""])
-    fd, script = tempfile.mkstemp(prefix="decomp-wsl-", suffix=".sh")
+    temp folder, so nothing depends on how wsl.exe splits a Windows command line (see `script` for `outputs`)."""
+    body = script(path(cwd), argv, outputs=outputs, inputs=inputs, stage=stage)
+    fd, script_file = tempfile.mkstemp(prefix="decomp-wsl-", suffix=".sh")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(body.encode())  # LF line ends, whatever the platform
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        res = subprocess.run([exe() or "wsl", "-e", "sh", path(script)], capture_output=True, timeout=timeout,
+        res = subprocess.run([exe() or "wsl", "-e", "sh", path(script_file)], capture_output=True, timeout=timeout,
                              stdin=subprocess.DEVNULL, creationflags=flags)
     finally:
-        os.unlink(script)
+        os.unlink(script_file)
     return subprocess.CompletedProcess(res.args, res.returncode, _text(res.stdout), _text(res.stderr))
 
 

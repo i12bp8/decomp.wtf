@@ -62,13 +62,13 @@ def compiler_config(root: Path, cfg: dict) -> CompilerConfig:
     linux = False
     if "toolchain" in c:
         tc = toolchains.get(c["toolchain"])
-        linux = tc.via_wsl  # Windows: a Linux toolchain, run inside WSL 2
-        if linux and not (ok := wsl.status())[0]:
-            raise toolchains.ToolchainError(f"{tc.name} is a Linux program: on Windows it runs in WSL 2. {ok[1]}")
+        linux = tc.via_linux  # Windows: run inside WSL 2; macOS: in the compiler container (both Linux-only builds)
+        if linux and not (ok := toolchains.side_status())[0]:
+            raise toolchains.ToolchainError(f"{tc.name} is a Linux program: {ok[1]}")
         dirs = toolchains.runtime_dirs(tc.id)
         tc_dir = wsl.path(dirs[0]) if linux else str(dirs[0])
         ro_paths += [str(d) for d in dirs]
-        if "runtime-i386" in tc.requires and not linux:  # in WSL its programs bring the runtime themselves
+        if "runtime-i386" in tc.requires and not linux:  # on a Linux side its programs bring the runtime themselves
             runtime32 = str(toolchains.require("runtime-i386"))
         flags = c.get("flags", tc.flags)
         if c.get("cmd"):
@@ -91,7 +91,7 @@ def compiler_config(root: Path, cfg: dict) -> CompilerConfig:
         ro_paths=tuple(ro_paths),
         include_dirs=tuple(str((root / p).resolve()) for p in c.get("include_dirs", [])),
         runtime32=runtime32,
-        wsl=linux,
+        linux=linux,
     )
 
 

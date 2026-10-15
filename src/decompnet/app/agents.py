@@ -888,7 +888,8 @@ class Manager:
             }), encoding="utf-8")
             # --print-logs: opencode's JSON error only says "Unexpected server error"; the log line says what failed.
             # (No --dir: it runs in workdir, and OpenCode before 1.4 stops at the flag.)
-            cmd = [exe, "run", "--format", "json", "--print-logs", "--log-level", "ERROR"]
+            # (--log-level lowercase: OpenCode 2 rejects "ERROR", every version takes "error".)
+            cmd = [exe, "run", "--format", "json", "--print-logs", "--log-level", "error"]
             if model:
                 cmd += ["-m", model]
         else:

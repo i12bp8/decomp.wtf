@@ -1354,7 +1354,16 @@ class RomNetwork(Network):
                                                  k: getattr(twins, k) for k in ("state", "pairs", "tried", "matched", "asm")},
                                              "helper_matches": helpers,
                                              "spend": cfg.get("spend"), "instructions": cfg.get("instructions") or "",
-                                             "priority": cfg.get("priority", [])}
+                                             "priority": self._open_priority(proj, cfg.get("priority", []))}
+
+    def _open_priority(self, proj, names: list[str]) -> list[str]:
+        """The ★ Next in line functions still to do (a match takes one off the list; this hides any done another way)."""
+        if not names:
+            return []
+        done = {r["name"] for r in self.store.all(
+            f"SELECT name FROM functions WHERE project_id=? AND status='matched' AND name IN ({','.join('?' * len(names))})",
+            proj["id"], *names)}
+        return [n for n in names if n not in done]
 
     def _overview(self, slug: str, proj) -> dict:
         if (fork := self.fork_slug(slug)):
@@ -1603,9 +1612,14 @@ class RomNetwork(Network):
                                 f"{drafts} of {state['tried']} functions matched from machine drafts")
 
     def on_match(self, proj, function_id: int, agent: Agent | None = None) -> None:
-        """Queue twin matches, or start a fresh autopilot pass after a manual match when enabled."""
+        """Take the function off ★ Next in line; queue twin matches, or start a fresh autopilot pass after a manual
+        match when enabled."""
         if proj is None:
             return
+        name = self.store.one("SELECT name FROM functions WHERE id=?", function_id)
+        if name and name["name"] in self.cfg(self._project(proj["slug"])).get("priority", []):
+            self._update_cfg(proj["slug"], lambda cfg: cfg.__setitem__(
+                "priority", [n for n in cfg.get("priority", []) if n != name["name"]]))
         if agent is not None and agent.name == "autopilot" and self.twins._full_running(proj["slug"]):
             return
         slug = proj["slug"]

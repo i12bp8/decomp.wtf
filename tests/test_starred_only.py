@@ -82,3 +82,16 @@ def test_a_star_the_helper_gave_back_is_not_handed_to_it_again(net, tmp_path):
     with pytest.raises(NetworkError, match="no ★ Next in line function is left for you"):
         net.claim_row(helper, "game")
     assert manager._starred_left("game", helper.id, time.time() + 5) == (2, 2)  # a later session tries them anew
+
+
+def test_a_match_takes_the_function_off_next_in_line(net):
+    agent, _ = net.local_agent("helper")
+    fn = net.claim_row(agent, "game", "star_a")
+    net._record(fn, agent, 0, "int star_a(void) { return 0; }", 1, matched=True)
+    assert net.cfg(net._project("game"))["priority"] == ["star_b"]
+
+
+def test_the_list_never_shows_a_function_that_is_already_done(net):
+    with net.store.tx() as db:  # matched some other way (a twin, a rescan...), still in the saved list
+        db.execute("UPDATE functions SET status='matched' WHERE name='star_b'")
+    assert net._open_priority(net._project("game"), ["star_b", "star_a"]) == ["star_a"]

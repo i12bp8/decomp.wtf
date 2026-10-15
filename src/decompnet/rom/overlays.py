@@ -6,8 +6,9 @@ in the code that loads them or with an emulator. Here the code says it: every fi
 code, and its load address is the one that makes its own calls (jal: absolute addresses) land on its own functions'
 starts (n64code.py does the same for N64 segments).
 
-- A PS2 overlay that is an ELF program says where it goes: its loadable segments are taken as they are. IOP modules
-  (.IRX: the I/O processor's code, relocatable) are left out.
+- A PS2 ELF overlay's loadable segments say where they go. Include segments outside the boot program's resident
+  address range; independent executables that reuse the boot address (for example, a setup utility) are not
+  overlays. IOP modules (.IRX: relocatable code) are left out.
 - Several overlays may load at the same address (only one is in memory at a time): each is a segment of its own, and
   function names that repeat get the overlay's name in front (split.py).
 """
@@ -106,7 +107,8 @@ def find(disc, boot: str, platform: str, main: tuple[int, int]) -> list[tuple[st
             name += "_"
         if platform == "ps2" and (segs := _elf_segments(data)) is not None:
             for k, (vaddr, code) in enumerate(segs):
-                if _code_like(code):
+                overlaps_main = main[0] < vaddr + len(code) and vaddr < main[1]
+                if _code_like(code) and not overlaps_main:
                     out.append((f"{name}{k or ''}", code, vaddr, 0))
                     names.add(f"{name}{k or ''}")
             continue

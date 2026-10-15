@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from decompnet.rom import overlays, split
+from decompnet.rom import detect, overlays, split
 
 ROOT = Path(__file__).resolve().parent.parent
 EXE = ROOT / "projects" / "demo-psx" / "build" / "DEMOQ_PS1.EXE"
@@ -102,3 +102,33 @@ def test_a_disc_with_an_overlay_imports_both(tmp_path):
     rows = net.store.all("SELECT name, vram FROM functions WHERE project_id=?", net.project_row(slug)["id"])
     in_overlay = [r for r in rows if 0x80180000 <= r["vram"] < 0x80181000]
     assert len(in_overlay) == 40 and len(rows) > 40  # the program's functions and the overlay's
+
+
+def _ps2_elf(base: int, count: int = 24) -> bytes:
+    code = _overlay(base, count)
+    elf = bytearray(b"\x7fELF\x01\x01\x01" + bytes(9))
+    elf += struct.pack("<HHIIIIIHHHHHH", 2, 8, 1, base, 52, 0, 0, 52, 32, 1, 0, 0, 0)
+    elf += struct.pack("<8I", 1, 0x100, base, base, len(code), len(code), 5, 0x10)
+    return bytes(elf + bytes(0x100 - len(elf)) + code)
+
+
+def test_a_ps2_dvd_iso_excludes_an_unrelated_elf_at_main_vram(tmp_path):
+    """A large PS2 DVD is streamed; an independent ELF at the boot program's address isn't an overlay."""
+    boot = _ps2_elf(0x00100000)
+    ntgui = _ps2_elf(0x00100000)
+    game_overlay = _ps2_elf(0x007C4880)
+
+    disc = _iso({"SYSTEM.CNF": b"BOOT2 = cdrom0:\\SLUS_214.10;1\r\n", "SLUS_214.10": boot,
+                 "NTGUI.ELF": ntgui, "GAME.ELF": game_overlay})
+    path = tmp_path / "game.iso"
+    path.write_bytes(disc)
+    with path.open("ab") as image:
+        image.truncate(64 * 1024 * 1024 + 1)  # take the streaming-disc path without a large fixture
+
+    picked = detect.identify(path)
+    assert picked.platform == "ps2"
+    assert picked.filename == "game.elf"
+    assert picked.info["boot"] == "SLUS_214.10"
+    assert picked.data == boot
+    assert [(name, addr) for name, _, addr, _ in picked.overlays] == [("game", 0x007C4880)]
+

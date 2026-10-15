@@ -57,9 +57,11 @@ Everything runs on your computer. No account, no telemetry, nothing uploaded.
 
 ## Install
 
-decomp.wtf runs on **Linux**, and on **Windows** (supported, still unstable). The compilers it runs are Linux
-programs, so on Windows it runs in its own small Linux (a WSL 2 distribution called `decomp-wtf`), set up by the
-same script as on Linux. macOS isn't supported.
+decomp.wtf runs on **Linux**, on **Windows** (supported, still unstable) and on **macOS** (experimental). The
+compilers it runs are mostly Linux programs, so each system gives them a Linux to run in: on Windows decomp.wtf runs
+in its own small Linux (a WSL 2 distribution called `decomp-wtf`), set up by the same script as on Linux; on macOS
+the app runs natively and the compilers run in a small Docker container ([macOS](#macos-experimental) below). The
+whole app can also run in Docker ([Docker](#docker-the-whole-app-in-a-container)), which suits servers.
 
 **Linux**
 
@@ -87,6 +89,19 @@ and a desktop shortcut. Your projects are at `\\wsl.localhost\decomp-wtf\home\de
 One line sets up everything: [uv](https://docs.astral.sh/uv/), the app, the period compilers (pinned and
 checksum-verified) and the m2c draft decompiler. It then opens decomp.wtf in your browser. After that, start it any
 time from your apps menu (the Start menu on Windows) or by typing `decomp` in a terminal.
+
+**macOS** (experimental; the one-line installer doesn't support it yet, so you run from a checkout). You need
+[uv](https://docs.astral.sh/uv/) and [Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/),
+running:
+
+```
+git clone https://github.com/i12bp8/decomp.wtf && cd decomp.wtf
+uv run decomp
+```
+
+The app runs on your Mac (projects in `~/Decomp`, or the folder in `DECOMP_HOME`) and opens in your browser. The first
+time you install a compiler that only exists for Linux (EE-GCC, KMC GCC, the PlayStation GCCs, agbcc), decomp.wtf
+builds the small compiler image and starts its container by itself: see [macOS (experimental)](#macos-experimental).
 
 **Updates** come by themselves: when there's a new version, decomp.wtf asks once, and one click installs it and
 restarts the app in the same tab (helper agents carry on). Settings has "check now", "install updates by itself" and
@@ -369,7 +384,72 @@ tools run with a memory cap, so a runaway analysis can't take your computer down
 
 **Windows.** Several of the compilers (KMC GCC, the PlayStation GCCs, EE-GCC, agbcc) only exist as Linux programs,
 so on Windows decomp.wtf runs in its own WSL 2 distribution. The installer sets that up; you use the app in your
-browser as usual, and the results are byte-identical to Linux. macOS isn't supported.
+browser as usual, and the results are byte-identical to Linux.
+
+<a id="macos-experimental"></a>**macOS (experimental).** Upstream doesn't officially support it. What works is the split
+this section describes: the app runs **natively** on your Mac and only the compilers that can't run there run in
+Docker.
+
+| What | Where it runs |
+|---|---|
+| The app (browser UI, database, agents, MCP) | Natively on the Mac (`uv run decomp`) |
+| Compilers with a macOS build, and the Windows ones (Metrowerks CodeWarrior, through `wibo`) | Natively. On Apple Silicon they need Rosetta 2 |
+| Linux-only compilers (EE-GCC, KMC GCC, the PlayStation GCCs, agbcc, ...) | In one small, long-lived container |
+
+The container is `decomp-wtf-compiler`: bare Debian (`linux/amd64`, emulated on Apple Silicon) with the 32-bit C
+library and nothing of decomp.wtf in it, built once from `src/decompnet/linuxbox.Dockerfile` the first time you
+install a Linux-only compiler (Tools in the app, or `uv run decompnet toolchain install ee-gcc-2.96`). decomp.wtf starts
+it by itself and keeps it running (`--restart unless-stopped`); a compile through it takes about half a second.
+
+- **Same paths on both sides.** The Linux builds of the toolchains (`~/Library/Application Support/decompnet/toolchains/linux/`)
+  are mounted read-only and the compile folders (`.../decompnet/box-work`) read-write, at the same absolute paths as on
+  the Mac, so a compiler command means the same thing in the app and in the container.
+- **Sandboxed.** No network, 2 GiB of memory, a process limit. An exported project built with `build.py` gets its
+  own throwaway container with just its folder mounted.
+- **You don't use Docker yourself.** Agents, the MCP tools and the UI get the same compiler either way; whether one
+  runs natively or in the container isn't visible to them (the Tools page shows a "Docker" chip on the ones that go
+  through it).
+- **Needs Docker Desktop running.** If it isn't, installing or compiling with a Linux-only compiler says so and what
+  to start. To reset the container: `docker rm -f decomp-wtf-compiler` (it's made again on the next compile).
+  `DECOMP_LINUXBOX` points the tests at a stand-in for the `docker` command.
+- **Not supported yet:** the one-line installer (`install.sh` stops on macOS); run from a checkout as above.
+
+Metrowerks compilers (`mwcc`, `mwccarm`, `mwcc-ps2`) are Windows programs run by `wibo`, whose macOS build runs them
+natively. The Linux `wibo` can't run under Docker Desktop on Apple Silicon (Rosetta stops with "invalid gdt
+selector"): that is the main reason the app runs natively on a Mac and not in the container below.
+
+<a id="docker-the-whole-app-in-a-container"></a>**Docker: the whole app in a container.** The repository also ships a
+Compose file that runs decomp.wtf itself, with its own Linux, inside Docker. It uses the same Linux as the Windows WSL
+distribution (`site/public/linux-base.sh`), so what runs there is what runs on any Linux:
+
+```
+docker compose up -d                      # builds site/public/Dockerfile, starts container decomp-wtf
+docker compose exec decomp decomp url     # the address that opens it, already signed in
+```
+
+The app listens on `127.0.0.1:6464`. Everything it installs (the app, the compilers, your projects and the
+database) lives in the volume `decomp-wtf-home`, mounted at `/home/decomp`, so it survives rebuilds; updates it
+installs by itself stay too. To work on projects from your own folders, bind-mount them (for example
+`./decomp-project:/home/decomp/Decomp` in a `docker-compose.override.yml`; keep game data out of the repository). Point
+an agent on your computer at the app with `docker exec -i decomp-wtf decomp mcp` (stdio, no TTY).
+
+When it helps:
+
+- **A server or an always-on machine** hosting a team room or running agents unattended: see
+  [Decompile together](#decompile-together). Publish the room port next to `6464` and keep the volume on a disk you back up.
+- **A reproducible Linux**, whatever the host: the same compilers and tools as the installer, in one image. Good for
+  reproducing a bug, for CI, or for trying a branch without touching your own system.
+- **Keeping the compilers and the agents' file access away from your computer**: they only see the mounted folders.
+- **Intel Macs and Linux PCs** run it at native speed, without installing anything but Docker.
+
+What to know on a Mac with Apple Silicon: the image is `linux/amd64`, so everything in it is emulated and slower, the
+Metrowerks compilers don't run in it (see above), and the emulated 32-bit compilers need a bigger address-space cap
+than the default 2 GiB: set `DECOMP_COMPILER_AS_LIMIT` (bytes, `0` = none) to at least `8589934592` in the container's
+environment, or they fail with "Unable to find a guest_base". Prefer the native app there.
+
+The Mac app and the container can share one projects folder, but only one of them at a time (they use the same
+`.decomp` database). Each project's folder is stored with the path of the place that made it; when the other one opens
+the workspace, decomp.wtf points every project at its own folder there by itself.
 
 **When something goes wrong.** A failed import stays on screen with the reason and what happened, and **Copy for a
 bug report** puts the version, the error and the log on your clipboard for an
@@ -396,6 +476,7 @@ uv run pytest
 | `src/decompnet/network.py` | The coordination core the engine builds on: claims, attempts, notes, the shared header. |
 | `src/decompnet/toolchains.py` | The pinned compilers: verified downloads and installs. |
 | `src/decompnet/hostenv.py`, `app/updates.py` | Where decomp.wtf runs (Linux itself, its WSL 2 distribution on Windows, Docker on a server) and what crosses to the computer around it; updates. |
+| `src/decompnet/wsl.py`, `linuxbox.py` | Where Linux-only compilers run when the app isn't on Linux: WSL 2 on Windows, the compiler-only container on a Mac. |
 | `src/decompnet/app/twins.py`, `app/permute.py` | Free matches: identical code from its matched twin, and the background permuter for near misses. |
 | `site/public/install.sh`, `install.ps1`, `linux-base.sh`, `Dockerfile` | The installers: decomp.wtf's own Linux (WSL on Windows, Docker on a server) is made by `linux-base.sh` on Debian. |
 | `projects/demo-rom/` | Builds Demo Quest 64. `tests/test_rom.py` proves the matcher on it: every function of the original source matches. |

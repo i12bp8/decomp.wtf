@@ -351,6 +351,10 @@ a.ghost, a.primary { text-decoration: none; }
 .mini-list li.muted { display: block; padding: 14px 16px; white-space: normal; }
 .pad.row { display: flex; }
 .star { color: var(--work); margin-right: 5px; }
+.star-btn { width: 18px; margin-right: 5px; color: var(--faint); opacity: .35; font-size: 13px; line-height: 1; transition: opacity .1s, color .1s; }
+.fn-table tbody tr:hover .star-btn, .star-btn:focus-visible { opacity: 1; }
+.star-btn:hover { color: var(--work); }
+.star-btn.on { color: var(--work); opacity: 1; }
 
 /* ------------------------------------------------------------------ functions */
 .list-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 16px; border-bottom: 1px solid var(--line-soft); }

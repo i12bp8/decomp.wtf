@@ -19,7 +19,7 @@ dependencies = [
     "httpx>=0.28",
     "uvicorn>=0.30",
     "ninja>=1.11",  # builds GameCube/Wii (dtk) and other ninja-based decomp projects
-    "truststore>=0.10; sys_platform == 'win32'",  # HTTPS verified by Windows itself (see decompnet/__init__.py)
+    "truststore>=0.10; sys_platform == 'win32' or sys_platform == 'darwin'",  # HTTPS verified by the system itself (see decompnet/__init__.py)
     "zstandard>=0.23; sys_platform == 'linux'",  # the .zst runtime old compilers need, without the zstd command
 ]
 

@@ -14,10 +14,11 @@ def utf8_output() -> None:
                 stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-if sys.platform == "win32":
+if sys.platform in ("win32", "darwin"):
     # Python only trusts the root certificates Windows has already cached, and Windows fetches the others the first
     # time a browser needs them: downloads from some hosts (developer.arm.com) fail with CERTIFICATE_VERIFY_FAILED.
-    # Verify through Windows itself instead, like every other program there does.
+    # The Python builds uv installs on a Mac don't use the system's certificates at all, with the same failure.
+    # Verify through the system itself instead, like every other program there does.
     try:
         import truststore
 

@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -281,7 +281,7 @@ dependencies = [
     { name = "rabbitizer" },
     { name = "spimdisasm" },
     { name = "splat64", extra = ["mips"] },
-    { name = "truststore", marker = "sys_platform == 'win32'" },
+    { name = "truststore", marker = "sys_platform == 'darwin' or sys_platform == 'win32'" },
     { name = "uvicorn" },
     { name = "zstandard", marker = "sys_platform == 'linux'" },
 ]
@@ -301,7 +301,7 @@ requires-dist = [
     { name = "rabbitizer", specifier = ">=1.16.2" },
     { name = "spimdisasm", specifier = ">=1.42.4" },
     { name = "splat64", extras = ["mips"], specifier = ">=0.50.1" },
-    { name = "truststore", marker = "sys_platform == 'win32'", specifier = ">=0.10" },
+    { name = "truststore", marker = "sys_platform == 'darwin' or sys_platform == 'win32'", specifier = ">=0.10" },
     { name = "uvicorn", specifier = ">=0.30" },
     { name = "zstandard", marker = "sys_platform == 'linux'", specifier = ">=0.23" },
 ]

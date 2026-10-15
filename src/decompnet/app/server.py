@@ -656,6 +656,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
     def p_autopilot(slug, request, data):
         if data.get("action") == "stop":
             net.stop_autopilot(slug)
+            net.permuter.stop(slug)  # its background half: otherwise nothing stops it, and it keeps claiming (rescans refuse)
         else:
             net.start_autopilot(slug)
         return net.overview(slug)

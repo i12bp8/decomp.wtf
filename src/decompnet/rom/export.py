@@ -23,6 +23,7 @@ from pathlib import Path
 import yaml
 
 from .. import toolchains
+from ..compiler_profiles import effective_compiler
 from ..limits import capped
 from . import match
 from .symbols import AUTO_NAME
@@ -153,7 +154,8 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
             continue
         unit = net._effective_unit(row, units)
         hdr = net._context(proj["id"], unit)["header"]
-        compiled = net._compile(proj, hdr, row["matched_source"])
+        compiled = net._compile(proj, hdr, row["matched_source"], row)
+        f["profile"] = effective_compiler(cfg, row).get("profile")  # None: the project's default compiler
         if not compiled.ok:
             as_fallback.append((f["name"], "doesn't compile any more"))
             f["kind"] = "asm"
@@ -247,6 +249,8 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
         entry = {"name": f["name"], "seg": f["seg"], "vram": f["vram"], "rom": f["rom"], "asm": f["asm"]}
         if f["kind"] == "c":
             entry["c"] = f["src"]
+            if f.get("profile"):
+                entry["profile"] = f["profile"]
             entry["own"] = {sec: base for (obj, sec, base) in private if obj == f["obj"]}
         fn_json.append(entry)
 
@@ -260,6 +264,7 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
     build = {
         "title": proj["name"], "platform": platform, "image": base, "output": f"build/game{ext}",
         "sha1": hashlib.sha1(image).hexdigest(), "compiler": cfg["compiler"], "gp": cfg.get("gp") or 0,
+        "compiler_profiles": cfg.get("compiler_profiles", {}),
         "big_endian": platform == "n64",
         "as_flags": [*AS_FLAGS[platform], "-G0", "-no-pad-sections", "-I", "include"],
         "ld_flags": [LD_ENDIAN[platform], "--no-check-sections"],

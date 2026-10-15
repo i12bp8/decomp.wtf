@@ -33,6 +33,7 @@ DISCARD = ("*(.reginfo) *(.MIPS.abiflags) *(.MIPS.options) *(.pdr) *(.comment) *
 try:
     from decompnet import toolchains
     from decompnet.compiler import run_in
+    from decompnet.compiler_profiles import effective_compiler
     from decompnet.project import compiler_config
 except ImportError:
     sys.exit("This build uses decomp.wtf's pinned compilers: install decomp.wtf first (https://decomp.wtf).")
@@ -80,22 +81,29 @@ def c_source(fn: dict) -> str | None:
     return path if (ROOT / path).exists() else None
 
 
-def objects() -> tuple[list[tuple[str, str, str]], dict[str, str]]:
-    """[(kind, source, object)] to build, and function name -> the object that provides it."""
+def compiler_for(profile: str | None):
+    """The compiler for a function: its profile from build.json (see decompnet.compiler_profiles), else the default."""
+    cfg = {"compiler": B["compiler"], "compiler_profiles": B.get("compiler_profiles", {}),
+           "compiler_functions": {"fn": profile} if profile else {}}
+    return compiler_config(ROOT, {"compiler": effective_compiler(cfg, {"name": "fn", "vram": None, "unit": None})})
+
+
+def objects() -> tuple[list[tuple[str, str, str, str | None]], dict[str, str]]:
+    """[(kind, source, object, compiler profile)] to build, and function name -> the object that provides it."""
     out, provides = [], {}
     for a in B["assembly"]:
-        out.append(("asm", a["src"], a["obj"]))
+        out.append(("asm", a["src"], a["obj"], None))
     for fn in B["functions"]:
         c = c_source(fn)
         if c:
             obj = f"build/{Path(c).with_suffix('.o').as_posix()}"
-            out.append(("c", c, obj))
+            out.append(("c", c, obj, fn.get("profile")))
         else:
             wrap = ROOT / "build" / "wrap" / f"{fn['name']}.s"
             wrap.parent.mkdir(parents=True, exist_ok=True)
             wrap.write_text(PREAMBLE[B["platform"]] + f'.include "{fn["asm"]}"\n', encoding="utf-8")
             obj = f"build/{Path(fn['asm']).with_suffix('.o').as_posix()}"
-            out.append(("asm", wrap.relative_to(ROOT).as_posix(), obj))
+            out.append(("asm", wrap.relative_to(ROOT).as_posix(), obj, None))
         provides[fn["name"]] = obj
     return out, provides
 
@@ -129,10 +137,9 @@ def trim(path: Path) -> None:
     path.write_bytes(bytes(data))
 
 
-def build_objects(todo: list[tuple[str, str, str]]) -> None:
-    cfg = compiler_config(ROOT, {"compiler": B["compiler"]})
+def build_objects(todo: list[tuple[str, str, str, str | None]]) -> None:
     as_ = binutils("as")
-    for kind, src, obj in todo:
+    for kind, src, obj, profile in todo:
         target = ROOT / obj
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists() and target.stat().st_mtime > (ROOT / src).stat().st_mtime and kind == "asm":
@@ -140,6 +147,7 @@ def build_objects(todo: list[tuple[str, str, str]]) -> None:
         if kind == "asm":
             run([as_, *B["as_flags"], "-o", obj, src])
         else:
+            cfg = compiler_for(profile)
             argv = [a.replace("{src}", src).replace("{obj}", obj).replace("{include}", "include") for a in cfg.cmd]
             res = run_in(cfg, ROOT, argv, inputs=[src, "include"], outputs=[obj])
             if res.returncode != 0 or not target.exists():
@@ -246,7 +254,7 @@ def build() -> bool:
     build_objects(todo)
     gaps = fill_gaps(provides)
     (ROOT / "build" / "game.ld").write_text(linker_script(provides, gaps), encoding="utf-8")
-    objs = sorted({obj for _, _, obj in todo} | {obj for _, obj in gaps})
+    objs = sorted({obj for _, _, obj, _ in todo} | {obj for _, obj in gaps})
     run([binutils("ld"), *B["ld_flags"], "-T", "build/game.ld", "-o", "build/game.elf", *objs])
     run([binutils("objcopy"), "-O", "binary", "build/game.elf", B["output"]])
     out, base = (ROOT / B["output"]).read_bytes(), (ROOT / B["image"]).read_bytes()
@@ -296,7 +304,7 @@ def check(name: str) -> bool:
                     return image[at:at + n]
         return None
 
-    cfg = compiler_config(ROOT, {"compiler": B["compiler"]})
+    cfg = compiler_for(fn.get("profile"))
     text = (ROOT / src).read_text(encoding="utf-8")
     m = re.match(r'\s*#include "([^"]+)"\s*\n', text)
     header = (ROOT / "include" / m.group(1)).read_text(encoding="utf-8") if m else ""

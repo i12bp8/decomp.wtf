@@ -414,6 +414,20 @@ description = "Every CodeWarrior version GameCube and Wii games were built with 
 url = "https://files.decomp.dev/compilers_20251118.zip"
 sha256 = "69b0d4980a2eccea4ae6e70b486714b5190cb6c75e3bc7b8fb5878a8854d0d1c"
 
+[mwcc-ps2]
+name = "Metrowerks CodeWarrior for PlayStation 2 (mwccps2 3.0.1 build 198)"
+platform = "PS2"
+arch = "mipsel"
+license = "proprietary"
+source = "decompme/compilers release 'compilers' mwcps2-3.0.1b198-051011.tar.gz (the decomp community's archive)"
+description = "The CodeWarrior PS2 compiler of October 2005 (3.0.1 build 198), the build Mortal Kombat: Armageddon's Midway functions were checked against. A Windows program, run through wibo on Linux and macOS."
+requires = ["wibo"]
+cc = ["{tc:wibo}/wibo", "{tc}/mwccps2.exe", "-c"]
+flags = ["-O4,p", "-sdatathreshold", "0"]
+[["mwcc-ps2".parts]]
+url = "https://github.com/decompme/compilers/releases/download/compilers/mwcps2-3.0.1b198-051011.tar.gz"
+sha256 = "436af8060249e7ea0aa2dfa98a86b4667ee3716b3384cca577c52c5b68e4934a"
+
 [mwccarm]
 name = "Metrowerks CodeWarrior for Nintendo DS (mwccarm)"
 kind = "compiler-pack"

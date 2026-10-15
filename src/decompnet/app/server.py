@@ -202,7 +202,7 @@ class Settings:
                 "autopilot_after_match": bool(self.data.get("autopilot_after_match")),
                 "budget_usd": self.data.get("budget_usd") or 0,
                 "auto_update": bool(self.data.get("auto_update")), "check_updates": self.data.get("check_updates", True) is not False,
-                "launcher": _launcher(self.data.get("launcher") or {}), "recent_models": self.data.get("recent_models") or {}}
+                "launcher": _launcher(self.data.get("launcher") or {})}
 
 
 def _session_options(entry: dict) -> dict:
@@ -577,7 +577,9 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         return out
 
     def p_compiler(slug, request, data):
-        net.set_compiler(slug, str(data.get("toolchain", "")), data.get("flags") or None)
+        assignments = {key: data[key] for key in ("compiler_profiles", "compiler_ranges", "compiler_functions")
+                       if key in data}
+        net.set_compiler(slug, data.get("toolchain"), data.get("flags"), **assignments)
         return net.overview(slug)
 
     def p_export(slug, request, data):

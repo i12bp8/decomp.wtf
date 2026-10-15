@@ -853,6 +853,13 @@ function renderStats(ov) {
   renderNext(ov);
 }
 
+/* Linux-only compilers need a Linux side: WSL 2 on Windows, the compiler container (Docker Desktop) on a Mac. */
+function linuxHint(side) {
+  return side === "wsl"
+    ? " It's a Linux program: on Windows it runs inside WSL 2 (one-time setup: <code>wsl --install</code> in an administrator PowerShell, then restart)."
+    : " It's a Linux program: on a Mac it runs in a small compiler-only container (needs Docker Desktop running; installing builds the container's image once).";
+}
+
 function renderCompilerNotice(ov) {
   const n = $("compilerNotice");
   const unc = ov.kind === "fork" && ov.ready ? ov.uncovered : null;
@@ -885,7 +892,7 @@ function renderCompilerNotice(ov) {
   n.className = "notice";
   n.innerHTML = ov.compiler.proprietary
     ? `<span><b>${esc(ov.compiler.name)}</b> isn't installed. It's proprietary software (recompiled by the decomp community); install it only if you accept that.</span><span class="grow"></span><button class="primary small-btn" id="tcInstall" type="button">Install…</button>`
-    : `<span><b>${esc(ov.compiler.name)}</b> isn't installed yet.${ov.compiler.wsl ? " It's a Linux program: on Windows it runs inside WSL 2 (one-time setup: <code>wsl --install</code> in an administrator PowerShell, then restart)." : ""}</span><span class="grow"></span><button class="primary small-btn" id="tcInstall" type="button">Install now</button>`;
+    : `<span><b>${esc(ov.compiler.name)}</b> isn't installed yet.${ov.compiler.linux ? linuxHint(ov.compiler.linux_side) : ""}</span><span class="grow"></span><button class="primary small-btn" id="tcInstall" type="button">Install now</button>`;
   $("tcInstall").onclick = () => installToolchain(ov.compiler.toolchain, ov.compiler.proprietary);
 }
 
@@ -1531,7 +1538,7 @@ function renderSessions(sessions) {
   const board = new Map((S.stats?.agents || []).map((r) => [r.agent, r]));
   const running = sessions.filter((s) => ["starting", "working", "waiting"].includes(s.state));
   $("stopAll").hidden = running.length < 2;
-  box.innerHTML = sessions.map((s) => {
+  const mine = sessions.map((s) => {
     const claim = S.claims.find((c) => c.agent === s.agent);
     const dot = s.state === "error" ? "err" : s.state === "working" ? "on" : s.state === "stopped" ? "" : "work";
     const live = ["starting", "working", "waiting"].includes(s.state);
@@ -1547,10 +1554,15 @@ function renderSessions(sessions) {
   }).join("");
   const own = new Set(sessions.map((s) => s.agent));
   const outside = [...new Set(S.claims.filter((c) => !own.has(c.agent) && c.agent !== AUTO).map((c) => c.agent))];
-  box.insertAdjacentHTML("beforeend", outside.map((a) => `<div class="session ext"><div class="session-top"><span class="dot on"></span><b>${esc(a)}</b><span class="tag">${a.startsWith("@") ? "in the room" : "connected agent"}</span></div>
-      <span class="last">on ${S.claims.filter((c) => c.agent === a).map((c) => fnLink(c.name)).join(", ")}</span></div>`).join(""));
-  box.querySelectorAll(".fn").forEach((x) => { x.onclick = () => openFn(x.dataset.fn); });
+  const ext = outside.map((a) => `<div class="session ext"><div class="session-top"><span class="dot on"></span><b>${esc(a)}</b><span class="tag">${a.startsWith("@") ? "in the room" : "connected agent"}</span></div>
+      <span class="last">on ${S.claims.filter((c) => c.agent === a).map((c) => fnLink(c.name)).join(", ")}</span></div>`).join("");
   $("noSessions").hidden = sessions.length + outside.length > 0;
+  // Same content as last time: leave the DOM alone. The poll runs every second or two, and replacing a button
+  // between a mouse press and its release drops the click, which made Stop impossible to hit while an agent worked.
+  if (box.dataset.sig === mine + ext) return;
+  box.dataset.sig = mine + ext;
+  box.innerHTML = mine + ext;
+  box.querySelectorAll(".fn").forEach((x) => { x.onclick = () => openFn(x.dataset.fn); });
   box.querySelectorAll("[data-stop]").forEach((b) => {
     b.onclick = async () => {
       await api("/api/agents/stop", { method: "POST", body: { id: b.dataset.stop, remove: !!b.dataset.remove } }).catch((e) => toast(esc(e.message), "err"));
@@ -1931,6 +1943,7 @@ async function refreshFn(first) {
     $("fnAddr").textContent = S.ov.kind === "fork"
       ? `${d.unit} · ${d.insns} instructions${d.match_percent != null ? ` · ${d.match_percent >= 100 ? "100" : (Math.floor(d.match_percent * 10) / 10).toFixed(1)}% now` : ""}`
       : `${hex8(d.vram)} · ROM 0x${d.rom_offset.toString(16).toUpperCase()} · ${d.insns} instructions`;
+    if (d.compiler) $("fnAddr").textContent += ` · ${d.compiler.profile || "default"}: ${d.compiler.toolchain} ${d.compiler.flags.join(" ")}`;
     $("fnName").textContent = d.name;
     fnBadge(d);
     const pinned = (S.ov.priority || []).includes(d.name);
@@ -2464,6 +2477,9 @@ async function renderProjectSettings() {
     if (!S.st) await loadState();
     fillCompilers($("setTc"), ov.compiler.toolchain, { n64: "N64", psx: "PS1", ps2: "PS2", gba: "GBA" }[ov.platform]);
     $("setFlags").value = ov.compiler.flags.join(" ");
+    $("setProfiles").value = JSON.stringify(ov.compiler_profiles || {}, null, 2);
+    $("setRanges").value = JSON.stringify(ov.compiler_ranges || [], null, 2);
+    $("setFunctions").value = JSON.stringify(ov.compiler_functions || {}, null, 2);
   }
   const facts = [["Platform", ov.platform_name], ["Game", ov.rom?.title || ov.title], [fork ? "Version" : "Game code", ov.rom?.game_code || ov.version],
     !fork && ov.rom?.region ? ["Region", ov.rom.region] : null, fork ? ["Layout", ov.origin === "scratch" ? (LAYOUT[ov.platform] || "decomp") + " (from scratch)" : ov.fork_kind] : ["Compiler", `${ov.compiler.name} ${ov.compiler.flags.join(" ")}`],
@@ -2480,6 +2496,21 @@ $("setTcSave").onclick = async () => {
     renderProjectSettings();
     toast("Compiler settings saved.");
   } catch (e) { toast(esc(e.message), "err"); }
+};
+$("setProfilesSave").onclick = async () => {
+  const button = $("setProfilesSave");
+  try {
+    const body = { slug: S.slug,
+      compiler_profiles: JSON.parse($("setProfiles").value),
+      compiler_ranges: JSON.parse($("setRanges").value),
+      compiler_functions: JSON.parse($("setFunctions").value) };
+    button.disabled = true;
+    S.ov = await api("/api/compiler", { method: "POST", body });
+    renderStats(S.ov);
+    await renderProjectSettings();
+    toast("Compiler profiles saved.");
+  } catch (e) { toast(esc(e.message), "err"); }
+  finally { button.disabled = false; }
 };
 $("folderBtn").onclick = () => openFolder();
 $("deleteBtn").onclick = () => {
@@ -2590,7 +2621,7 @@ function renderTools() {
   $("toolChips").querySelectorAll("[data-g]").forEach((b) => { b.onclick = () => { toolFilter = b.dataset.g; renderTools(); }; });
   const rows = all.filter((t) => !toolFilter || group(t) === toolFilter);
   $("toolGrid").innerHTML = rows.map((t) => `<div class="tool-card ${t.installed ? "ok" : ""}">
-      <div class="tc-top"><b>${esc(t.name)}</b>${t.license === "proprietary" ? `<span class="chip-s warn">proprietary</span>` : ""}${t.platform ? `<span class="chip-s">${esc(t.platform)}</span>` : ""}${t.wsl ? `<span class="chip-s" title="A Linux program: on Windows it runs inside WSL 2">WSL 2</span>` : ""}</div>
+      <div class="tc-top"><b>${esc(t.name)}</b>${t.license === "proprietary" ? `<span class="chip-s warn">proprietary</span>` : ""}${t.platform ? `<span class="chip-s">${esc(t.platform)}</span>` : ""}${t.linux ? `<span class="chip-s" title="A Linux program: ${esc(t.linux_side)}">${t.linux_side === "wsl" ? "WSL 2" : "Docker"}</span>` : ""}</div>
       <p class="muted small">${esc(t.use)}</p>
       <div class="row">${!t.supported ? `<span class="muted small">not available for this computer</span>` : t.installed ? `<span class="ok-mark">✓ installed</span>` : `<button class="ghost small-btn" data-tc="${esc(t.id)}" data-prop="${t.license === "proprietary" ? 1 : ""}" type="button">Install</button>`}</div></div>`).join("");
   $("toolGrid").querySelectorAll("[data-tc]").forEach((b) => { b.onclick = () => { b.disabled = true; installToolchain(b.dataset.tc, !!b.dataset.prop).finally(() => { b.disabled = false; }); }; });

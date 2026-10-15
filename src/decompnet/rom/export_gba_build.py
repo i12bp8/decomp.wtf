@@ -28,6 +28,7 @@ _LABEL = re.compile(r"\b(_[0-9A-F]{8})\b")
 try:
     from decompnet import toolchains
     from decompnet.compiler import run_in
+    from decompnet.compiler_profiles import effective_compiler
     from decompnet.project import compiler_config
 except ImportError:
     sys.exit("This build uses decomp.wtf's pinned tools: install decomp.wtf first (https://decomp.wtf).")
@@ -125,6 +126,13 @@ def trim(path: Path) -> None:
     path.write_bytes(bytes(data))
 
 
+def compiler_for(profile: str | None):
+    """The compiler for a function: its profile from build.json (see decompnet.compiler_profiles), else the default."""
+    cfg = {"compiler": B["compiler"], "compiler_profiles": B.get("compiler_profiles", {}),
+           "compiler_functions": {"fn": profile} if profile else {}}
+    return compiler_config(ROOT, {"compiler": effective_compiler(cfg, {"name": "fn", "vram": None, "unit": None})})
+
+
 def build_objects() -> tuple[list[dict], dict[str, str]]:
     """Assemble every piece and compile every C function: (pieces, function name -> its C object)."""
     pieces = json.loads((ROOT / "asm" / "pieces.json").read_text(encoding="utf-8"))
@@ -134,12 +142,12 @@ def build_objects() -> tuple[list[dict], dict[str, str]]:
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists() or target.stat().st_mtime < (ROOT / p["src"]).stat().st_mtime:
             run([arm("as"), *AS_FLAGS, "-o", p["obj"], p["src"]])
-    cfg = compiler_config(ROOT, {"compiler": B["compiler"]})
     c_objs = {}
     for fn in B["functions"]:
         src = c_source(fn)
         if not src:
             continue
+        cfg = compiler_for(fn.get("profile"))
         obj = f"build/{Path(src).with_suffix('.o').as_posix()}"
         (ROOT / obj).parent.mkdir(parents=True, exist_ok=True)
         argv = [a.replace("{src}", src).replace("{obj}", obj).replace("{include}", "include") for a in cfg.cmd]
@@ -264,7 +272,7 @@ def check(name: str) -> bool:
     def read(addr: int, n: int) -> bytes | None:
         return image[addr - base:addr - base + n] if base <= addr and addr + n <= base + len(image) else None
 
-    cfg = compiler_config(ROOT, {"compiler": B["compiler"]})
+    cfg = compiler_for(fn.get("profile"))
     text = (ROOT / src).read_text(encoding="utf-8")
     m = re.match(r'\s*#include "([^"]+)"\s*\n', text)
     header = (ROOT / "include" / m.group(1)).read_text(encoding="utf-8") if m else ""

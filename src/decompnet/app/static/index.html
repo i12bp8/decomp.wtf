@@ -356,10 +356,18 @@
       <section class="panel" id="compilerPanel">
         <header class="panel-head"><h2>Compiler</h2></header>
         <div class="pad">
-          <p class="muted small">Every function is built with this compiler and these flags. If almost nothing matches, the game was probably built with another compiler or flags.</p>
+          <p class="muted small">Default compiler and flags. Named profiles can override this default by address range or function; a function override takes precedence over its range.</p>
           <label class="field"><span>Compiler</span><select id="setTc"></select></label>
           <label class="field"><span>Flags</span><input id="setFlags" class="mono"></label>
           <div class="row"><button class="primary small-btn" id="setTcSave" type="button">Save</button><button class="ghost small-btn" id="setTcReset" type="button">Default flags</button></div>
+          <details>
+            <summary>Mixed-compiler profiles</summary>
+            <p class="muted small">JSON configuration. Ranges use inclusive start and exclusive end addresses (decimal integers), with an optional segment. Changing a profile rechecks affected matches.</p>
+            <label class="field"><span>Profiles: {"name": {"toolchain": "id", "flags": ["-O2"]}}</span><textarea id="setProfiles" class="mono" rows="8" spellcheck="false"></textarea></label>
+            <label class="field"><span>Ranges: [{"start": 1048576, "end": 2097152, "profile": "name"}]</span><textarea id="setRanges" class="mono" rows="6" spellcheck="false"></textarea></label>
+            <label class="field"><span>Functions: {"func_00100000": "name"}</span><textarea id="setFunctions" class="mono" rows="5" spellcheck="false"></textarea></label>
+            <button class="primary small-btn" id="setProfilesSave" type="button">Save profiles and assignments</button>
+          </details>
         </div>
       </section>
       <section class="panel">

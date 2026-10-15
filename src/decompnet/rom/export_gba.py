@@ -15,6 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from ..compiler_profiles import effective_compiler
 from ..limits import capped
 from . import match_arm
 from .export import ExportError
@@ -64,6 +65,7 @@ def export_gba(net, slug: str, out: Path, log=print) -> dict:
     build = {
         "title": proj["name"], "platform": "gba", "image": "baserom.gba", "output": "build/game.gba",
         "sha1": hashlib.sha1(image).hexdigest(), "base": BASE, "compiler": cfg["compiler"],
+        "compiler_profiles": cfg.get("compiler_profiles", {}),
         "functions": functions, "symbols": dict(sorted(symbols.items(), key=lambda kv: kv[1])),
     }
     (out / "build.json").write_text(json.dumps(build, indent=1), encoding="utf-8")
@@ -88,7 +90,7 @@ def _check_c(net, proj, row, thumb: bool, units, f: dict) -> str | None:
     if row["vram"] % 4:
         return "it starts halfway a word, where agbcc never puts a function"
     hdr = net._context(proj["id"], net._effective_unit(row, units))["header"]
-    compiled = net._compile(proj, hdr, row["matched_source"])
+    compiled = net._compile(proj, hdr, row["matched_source"], row)
     if not compiled.ok:
         return "doesn't compile any more"
     linked = match_arm.link(compiled.obj, row["name"], match_arm.ArmTarget(row["name"], row["vram"], row["target"], thumb),
@@ -102,6 +104,8 @@ def _check_c(net, proj, row, thumb: bool, units, f: dict) -> str | None:
             return "its own data isn't laid out like the game's"
         own[section] = base.pop()
     f["own"] = own
+    if profile := effective_compiler(net.cfg(proj), row).get("profile"):
+        f["profile"] = profile  # build.py compiles this function with that profile; no key: the default compiler
     return None
 
 

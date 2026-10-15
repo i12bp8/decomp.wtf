@@ -23,6 +23,7 @@ import threading
 import time
 from pathlib import Path
 
+from .. import compiler_profiles as profiles
 from .. import scoring, seeds, similarity, toolchains
 from ..elfobj import FunctionObj
 from ..network import Agent, Network, NetworkError, _hash_token
@@ -44,11 +45,12 @@ COMPILERS = {
     "gcc-2.7.2-psx": "PlayStation games (PSY-Q era GCC)",
     "gcc-2.8.1-psx": "later PlayStation games",
     "ee-gcc-2.96": "PlayStation 2 games (Sony's EE GCC)",
+    "mwcc-ps2": "PlayStation 2 games built with CodeWarrior (proprietary)",
     "agbcc": "Game Boy Advance games (pret's agbcc, GCC 2.95)",
 }
 SHORT_NAMES = {"gcc-2.7.2-kmc": "KMC GCC 2.7.2", "ido-7.1": "IDO 7.1", "ido-5.3": "IDO 5.3",
                "gcc-2.7.2-psx": "GCC 2.7.2 (PS1)", "gcc-2.8.1-psx": "GCC 2.8.1 (PS1)", "ee-gcc-2.96": "EE-GCC 2.96",
-               "agbcc": "agbcc"}
+               "agbcc": "agbcc", "mwcc-ps2": "MWCC PS2 3.0.1 b198"}
 # CodeWarrior versions in the `mwcc` pack (GameCube, Wii) and the `mwccarm` pack (DS), for games started from scratch.
 MW_VERSIONS = {
     "gc": ["GC/1.0", "GC/1.1", "GC/1.1p1", "GC/1.2.5", "GC/1.2.5n", "GC/1.3", "GC/1.3.2", "GC/1.3.2r", "GC/2.0",
@@ -73,7 +75,7 @@ TOOLS = {
 # Functions this small are handed out in batches (claim_function count): agents match most on the first try.
 BATCH_INSNS = 48
 PLATFORM_COMPILERS = {"n64": ["gcc-2.7.2-kmc", "ido-7.1", "ido-5.3"], "psx": ["gcc-2.7.2-psx", "gcc-2.8.1-psx"],
-                      "ps2": ["ee-gcc-2.96"], "gba": ["agbcc"]}
+                      "ps2": ["ee-gcc-2.96", "mwcc-ps2"], "gba": ["agbcc"]}
 _AUTO_TOKEN = re.compile(r"\b(?:func|D|B|jtbl|RO|STR|FLT|DBL)_[0-9A-F]{8}\b")
 _ADDRESS = re.compile(r"^(?:0x)?([0-9A-Fa-f]{8})$")
 
@@ -123,10 +125,12 @@ def _preview(data: bytes | None, kind: str) -> str:
     return data[:16].hex(" ")
 
 
+
 class RomNetwork(Network):
     def __init__(self, db_path: str | Path, workspace: Path, claim_ttl: int = 30 * 60):
         super().__init__(db_path, claim_ttl=claim_ttl)
         self.workspace = Path(workspace)
+        self._rebase_roots()
         self._syms: dict[int, SymbolTable] = {}
         self._sym_override: dict[int, SymbolTable] = {}
         self._roms: dict[int, tuple[bytes, list[split.Segment]]] = {}
@@ -152,6 +156,16 @@ class RomNetwork(Network):
         self.rescan_busy = lambda slug: False  # server supplies its built-in agent/session guard
 
     # ------------------------------------------------------------------ basics
+
+    def _rebase_roots(self) -> None:
+        """A workspace can be opened from another place than the one that made it (a Mac folder shared with Docker,
+        the same folder in WSL): a project whose stored folder is gone, but whose slug folder sits in this workspace,
+        moves there. Opening it where it was made moves it back the same way."""
+        for p in self.store.all("SELECT id, slug, root FROM projects"):
+            here = self.workspace / p["slug"]
+            if p["root"] and not Path(p["root"]).exists() and here.is_dir():
+                with self.store.tx() as db:
+                    db.execute("UPDATE projects SET root=? WHERE id=?", (str(here), p["id"]))
 
     def _require_budget(self, agent: Agent) -> None:
         """Your machine, your agent: no compile budget."""
@@ -550,7 +564,7 @@ class RomNetwork(Network):
         """m2c draft, made the first time someone opens the function (imports stay fast)."""
         if fn["seed"] is not None or not seeds.available():
             return fn["seed"]
-        tc = self.cfg(proj)["compiler"]["toolchain"]
+        tc = profiles.effective_compiler(self.cfg(proj), fn)["toolchain"]
         asm = self._asm_text(fn, proj)
         data_asm = None
         if "jtbl_" in fn["asm"]:
@@ -1357,8 +1371,11 @@ class RomNetwork(Network):
             "rom": {k: cfg["rom"].get(k) for k in ("title", "game_code", "region", "size", "sha1", "byte_order", "compiler_guess")},
             "compiler": {"toolchain": tc.id, "name": SHORT_NAMES.get(tc.id, tc.name), "flags": cfg["compiler"]["flags"],
                          "installed": toolchains.installed(tc.id) is not None, "proprietary": tc.proprietary,
-                         "supported": tc.supported, "wsl": tc.via_wsl,
+                         "supported": tc.supported, "linux": tc.via_linux,
+                         "linux_side": toolchains.side_name() if tc.via_linux else "",
                          "why": None if tc.supported else toolchains.unsupported_cpu()},
+            "compiler_profiles": cfg.get("compiler_profiles", {}), "compiler_ranges": cfg.get("compiler_ranges", []),
+            "compiler_functions": cfg.get("compiler_functions", {}),
             "functions": agg["total"] or 0, "matched": agg["matched"] or 0, "bytes": agg["bytes"] or 0,
             "matched_bytes": agg["matched_bytes"] or 0, "attempts": agg["attempts"] or 0,
             "context_version": self._context(proj["id"])["version"],
@@ -1595,7 +1612,7 @@ class RomNetwork(Network):
             db.execute("INSERT INTO claims VALUES(?,?,?,?)", (fn["id"], agent.id, now, now + 300))
         try:
             ctx = self._context(proj["id"], fn["unit"])
-            result = self._compile(proj, ctx["header"], source)
+            result = self._compile(proj, ctx["header"], source, fn)
             if not result.ok:
                 return {"matched": False, "score": None}
             cand, verdict, _ = self._evaluate(fn, proj, result.obj)
@@ -1623,12 +1640,13 @@ class RomNetwork(Network):
             self._seed_for(fn, proj)  # the readable draft, for the agents that come after
             ctx = self._context(proj["id"], fn["unit"])
             data_asm = "\n".join(self._jtbl_asm(proj, fn)) if "jtbl_" in (fn["asm"] or "") else None
-            draft = seeds.generate_from_asm(self._asm_text(fn, proj), fn["name"], self.cfg(proj)["compiler"]["toolchain"],
+            draft = seeds.generate_from_asm(self._asm_text(fn, proj), fn["name"],
+                                            profiles.effective_compiler(self.cfg(proj), fn)["toolchain"],
                                             ctx["header"], data_asm, valid=True)
             if not draft:
                 return "fail"
             source = f"/* machine draft (m2c), tried by autopilot */\n{seeds.M2C_MACROS}\n{draft}\n"
-            result = self._compile(proj, ctx["header"], source)
+            result = self._compile(proj, ctx["header"], source, fn)
             if not result.ok:
                 return "fail"
             cand, verdict, _ = self._evaluate(fn, proj, result.obj)
@@ -1663,7 +1681,7 @@ class RomNetwork(Network):
         key = (fn["id"], hashlib.sha1(source.encode()).hexdigest(), ctx["version"], proj["config"])
         if key in self._diffs:
             return self._diffs[key] | {"kind": kind}
-        result = self._compile(proj, ctx["header"], source)
+        result = self._compile(proj, ctx["header"], source, fn)
         if not result.ok:
             out = {"rows": None, "error": result.log.strip()[-3000:] or "it didn't compile", "source": source}
         else:
@@ -1759,17 +1777,35 @@ class RomNetwork(Network):
         return {"events": [dict(e) for e in reversed(events)], "attempts": [dict(t) for t in reversed(attempts)],
                 "claims": claims, "overview": self.overview(slug)}
 
-    def set_compiler(self, slug: str, toolchain: str, flags: list[str] | None = None) -> None:
+    def set_compiler(self, slug: str, toolchain: str | None = None, flags: list[str] | None = None, *,
+                     compiler_profiles=profiles.UNSET, compiler_ranges=profiles.UNSET,
+                     compiler_functions=profiles.UNSET) -> None:
+        """Change the default compiler (`toolchain`, `flags`) and/or the profile assignments: named profiles
+        (toolchain + flags), VRAM ranges (global or per segment) and per-function overrides, see compiler_profiles.
+        Everything is validated before anything is saved."""
         if self.fork_slug(slug):
             raise NetworkError("a fork builds with the project's own compilers and flags")
         proj = self._project(slug)
-        tc = toolchains.get(toolchain)
         cfg = self.cfg(proj)
-        cfg["compiler"] = {"toolchain": tc.id, "flags": flags or tc.flags, "timeout": 20}
+        label = []
+        if toolchain is not None:
+            tc = toolchains.get(toolchain)
+            cfg["compiler"] = {"toolchain": tc.id, "flags": flags or tc.flags, "timeout": 20}
+            label.append(f"{tc.name} {' '.join(cfg['compiler']['flags'])}")
+        for key, value in (("compiler_profiles", compiler_profiles), ("compiler_ranges", compiler_ranges),
+                           ("compiler_functions", compiler_functions)):
+            if value is not profiles.UNSET:
+                cfg[key] = value
+                label.append(key.replace("_", " "))
+        try:
+            profiles.validate(cfg, {r["name"] for r in self.store.all(
+                "SELECT name FROM functions WHERE project_id=?", proj["id"])})
+        except (ValueError, toolchains.ToolchainError) as e:
+            raise NetworkError(str(e))
         with self.store.tx() as db:
             db.execute("UPDATE projects SET config=? WHERE id=?", (json.dumps(cfg), proj["id"]))
             db.execute("UPDATE functions SET seed=NULL WHERE project_id=? AND status='open'", (proj["id"],))
-            self._event(db, proj["id"], None, "compiler", f"{tc.name} {' '.join(cfg['compiler']['flags'])}")
+            self._event(db, proj["id"], None, "compiler", "; ".join(label) or "compiler")
 
     def chat_agent(self, base: str) -> tuple[Agent, str]:
         """An identity for an agent the user talks to (Claude Code, Codex, ... connected with `decomp mcp`): `base`,

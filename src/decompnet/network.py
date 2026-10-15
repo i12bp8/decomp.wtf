@@ -19,6 +19,7 @@ from pathlib import Path
 from . import policy, scoring
 from .compiler import compile_source
 from .elfobj import FunctionObj, Reloc, extract_function
+from .compiler_profiles import effective_compiler
 from .project import compiler_config
 from .store import Store
 
@@ -191,9 +192,12 @@ class Network:
         row = self.store.one("SELECT name FROM agents WHERE id=?", agent_id) if agent_id else None
         return row["name"] if row else "?"
 
-    def _compile(self, proj, header: str, source: str):
+    def _compile(self, proj, header: str, source: str, fn=None):
+        """Compile with the project's compiler for `fn` (the default one, or the profile its function, segment or
+        address selects, see compiler_profiles); no `fn`: the default compiler."""
         root = Path(proj["root"])
-        return compile_source(compiler_config(root, json.loads(proj["config"])), header, source)
+        cfg = json.loads(proj["config"])
+        return compile_source(compiler_config(root, {**cfg, "compiler": effective_compiler(cfg, fn)}), header, source)
 
     def _evaluate(self, fn, proj, obj: bytes) -> tuple[FunctionObj | None, bool | None, list[str]]:
         """(candidate, verdict, problems) for a compiled object. verdict None means: decide by comparing
@@ -390,7 +394,7 @@ class Network:
                     db.execute("UPDATE claims SET expires_at=? WHERE function_id=?", (now + self.claim_ttl, fn["id"]))
 
         ctx = self._context(proj["id"], fn["unit"])
-        result = self._compile(proj, ctx["header"], source)
+        result = self._compile(proj, ctx["header"], source, fn)
 
         if not result.ok:
             self._record(fn, agent, None, source, ctx["version"])
@@ -597,7 +601,7 @@ class Network:
 
         def check(fn) -> tuple[str, str] | None:
             res = self._compile(proj, header_for(fn) if header_for else header,
-                                (sources or {}).get(fn["id"], fn["matched_source"]))
+                                (sources or {}).get(fn["id"], fn["matched_source"]), fn)
             if not res.ok:
                 return fn["name"], "no longer compiles: " + res.log.strip().splitlines()[0][:200] if res.log.strip() else "compile failed"
             cand, verdict, _ = self._evaluate(fn, proj, res.obj)

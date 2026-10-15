@@ -152,17 +152,22 @@ def is_local(base: str, resolve: bool = True) -> bool:
 _SIGNED_OUT = re.compile(r"not logged in|run /login|invalid api key|not authenticated|please (?:log|sign) ?in|"
                          r"auth(?:entication)? method", re.I)
 # what a model's provider says when the account has no credit left (DeepSeek: "Insufficient Balance", OpenAI:
-# "insufficient_quota", Anthropic: "credit balance is too low"): trying again can't help until it's topped up
+# "insufficient_quota", Anthropic: "credit balance is too low"), or a subscription's quota is used up until it resets
+# (Claude Code: "You've hit your session limit · resets 6pm"): trying again can't help until then
 _NO_CREDIT = re.compile(r"insufficient[ _](?:balance|credits?|funds|quota)|exceeded your current quota|"
-                        r"credit balance is too low|payment required|out of credits?", re.I)
+                        r"credit balance is too low|payment required|out of credits?|"
+                        r"hit your (?:session|usage|weekly|daily) limit[^\n]*", re.I)
 # and when it's asked too much at once (HTTP 429): it works again in a while
 _THROTTLED = re.compile(r"too many requests|rate[ _-]?limit|concurrency limit|\b429\b|overloaded", re.I)
 
 
 def no_credit(said: str) -> str | None:
-    """The helper's error when its model's provider says the account is out of credit, else None."""
+    """The helper's error when its model's provider says the account is out of credit or quota, else None."""
     if not (m := _NO_CREDIT.search(said)):
         return None
+    if "limit" in m.group(0).lower():
+        return (f"the agent's plan has used up its quota (\u201c{m.group(0).strip()}\u201d): start the agents again "
+                "once it resets")
     return (f"the model's provider says the account is out of credit (\u201c{m.group(0)}\u201d): top it up, then "
             "start the agents again")
 
